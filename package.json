@@ -1,0 +1,19 @@
+{
+  "name": "lastsecrets",
+  "version": "0.1.0",
+  "description": "LastSecrets: LastDB-backed local secret references with no-index secret values",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "lastsecrets": "src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
