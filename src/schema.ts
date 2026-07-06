@@ -1,6 +1,9 @@
 export const OWNER_APP_ID = "lastsecrets";
 
-export type FieldType = "String" | "Object" | { Array: "String" };
+export type FieldType =
+  | "String"
+  | { Array: "String" }
+  | { Object: Record<string, FieldType> };
 
 export type SchemaDefinition = {
   name: string;
@@ -52,7 +55,7 @@ export const lastSecretSchema: AddSchemaRequest = {
       provider: "String",
       purpose: "String",
       environment: "String",
-      secret_value: "Object",
+      secret_value: { Object: { value: "String" } },
       created_at: "String",
       updated_at: "String",
     },
