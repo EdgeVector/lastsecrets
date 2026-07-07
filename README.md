@@ -49,6 +49,48 @@ lastsecrets ref schema-r2-dev
 
 `lastsecrets list` and `lastsecrets search <term>` return metadata only and always print `value=<redacted>`.
 
+## Migrating raw secrets out of Brain
+
+Some Brain records may still contain raw secret values inline. `lastsecrets migrate`
+provides a **reviewable, staged** path from those raw values to `lastsecrets://`
+references. It never does a broad destructive rewrite.
+
+The flow is two-phase:
+
+1. **Plan (default, read-only).** Scan the named Brain schema(s)/field(s) for
+   secret material, classify every hit, and print a migration log. Nothing is
+   written.
+
+   ```sh
+   lastsecrets migrate --schema brain/Note --fields body,title --log migration.plan.log
+   ```
+
+2. **Apply (`--apply`).** Execute only the **high-confidence** staged actions:
+   store each secret through LastSecrets, then replace the raw value in the
+   owning Brain record with its `lastsecrets://` locator. Uncertain detections
+   are left untouched.
+
+   ```sh
+   lastsecrets migrate --schema brain/Note --fields body,title --apply --log migration.apply.log
+   ```
+
+Classification:
+
+- **High confidence** (staged, applied under `--apply`): provider token shapes
+  (AWS/GitHub/Slack/Stripe/OpenAI/Anthropic/Google keys), JWTs, and PEM private
+  key blocks.
+- **Uncertain** (recorded as `needs review`, **never** rewritten automatically):
+  generic `secret = ...` / `password = ...` / `token = ...` assignments, which
+  can be schema field names, documentation, or placeholders.
+
+Placeholders (`<redacted>`, `${ENV_VAR}`, `changeme`, already-migrated
+`lastsecrets://...` refs, values under 8 chars, …) are ignored.
+
+The migration log records, for every scanned record: what was **staged**, what
+**needs review**, and what was **intentionally left untouched** — and, after an
+apply, how many secrets were stored, how many records were updated, and any
+errors. Raw secret values never appear in the log (previews are redacted).
+
 ## Threat Model
 
 LastSecrets is a local LastDB client, not a network vault. The first threat boundary is accidental disclosure through developer workflows: logs, errors, search output, test snapshots, and references must not contain raw secret values. The CLI therefore accepts writes only through `--value-stdin`, stores the value in the `secret_value` field, and redacts that field everywhere except `lastsecrets get <slug>`.
