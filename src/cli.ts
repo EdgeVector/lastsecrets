@@ -11,6 +11,14 @@ import {
   putSecret,
   searchSecrets,
 } from "./storage.ts";
+import { newBrainClient } from "./brain.ts";
+import {
+  applyMigration,
+  planMigration,
+  renderMigrationLog,
+  type ScanTarget,
+} from "./migrate.ts";
+import { writeFileSync } from "node:fs";
 
 type Io = {
   stdout: Pick<typeof process.stdout, "write">;
@@ -127,6 +135,47 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
       return 0;
     }
 
+    if (command === "migrate") {
+      const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
+      if (!opts.schema) throw new Error("migrate requires --schema NAME (repeatable via comma)");
+      if (opts.fields.length === 0) {
+        throw new Error("migrate requires --fields FIELD[,FIELD...] to scan");
+      }
+      const config = loadStorageConfig(opts.config);
+      const secrets = newLastDbClient({
+        nodeUrl: config.nodeUrl,
+        socketPath: config.nodeSocketPath,
+        userHash: config.userHash,
+      });
+      const brain = newBrainClient({
+        nodeUrl: config.nodeUrl,
+        socketPath: config.nodeSocketPath,
+        userHash: config.userHash,
+      });
+      const targets: ScanTarget[] = opts.schema
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((schema) => ({ schema, fields: opts.fields }));
+      const deps = { brain, secrets, secretsConfig: config };
+      const plan = await planMigration(deps, targets);
+
+      const mode = opts.apply ? "apply" : "plan";
+      let applied;
+      if (opts.apply) {
+        applied = await applyMigration(deps, plan, targets);
+      }
+      const log = renderMigrationLog(plan, mode, applied);
+      if (opts.log) {
+        writeFileSync(opts.log, log, { encoding: "utf8", mode: 0o600 });
+        io.stdout.write(`migration log written to ${opts.log}\n`);
+      } else {
+        io.stdout.write(`${log}\n`);
+      }
+      if (applied && applied.errors.length > 0) return 1;
+      return 0;
+    }
+
     io.stderr.write(`${usage()}\n`);
     return 2;
   } catch (err) {
@@ -144,14 +193,22 @@ type Options = {
   purpose?: string;
   env?: string;
   valueStdin?: boolean;
+  schema?: string;
+  fields: string[];
+  apply?: boolean;
+  log?: string;
 };
 
 function parseOptions(args: string[]): Options {
-  const opts: Options = {};
+  const opts: Options = { fields: [] };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--value-stdin") {
       opts.valueStdin = true;
+      continue;
+    }
+    if (arg === "--apply") {
+      opts.apply = true;
       continue;
     }
     if (!arg.startsWith("--")) throw new Error(`unexpected argument: ${arg}`);
@@ -167,6 +224,13 @@ function parseOptions(args: string[]): Options {
     else if (key === "provider") opts.provider = value;
     else if (key === "purpose") opts.purpose = value;
     else if (key === "env") opts.env = value;
+    else if (key === "schema") opts.schema = value;
+    else if (key === "fields") {
+      opts.fields = value
+        .split(",")
+        .map((f) => f.trim())
+        .filter((f) => f.length > 0);
+    } else if (key === "log") opts.log = value;
     else throw new Error(`unknown option: --${key}`);
   }
   return opts;
@@ -187,6 +251,7 @@ function usage(): string {
     "       lastsecrets ref <slug>",
     "       lastsecrets list",
     "       lastsecrets search <term>",
+    "       lastsecrets migrate --schema NAME[,NAME] --fields FIELD[,FIELD] [--apply] [--log PATH]",
   ].join("\n");
 }
 
