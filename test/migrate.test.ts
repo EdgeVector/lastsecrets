@@ -4,8 +4,10 @@ import type { BrainClient, BrainRecord } from "../src/brain.ts";
 import type { LastDbClient, QueryRow } from "../src/lastdb.ts";
 import {
   applyMigration,
+  parseMigrationReview,
   planMigration,
   renderMigrationLog,
+  renderMigrationReview,
   type MigrationDeps,
   type ScanTarget,
 } from "../src/migrate.ts";
@@ -46,7 +48,8 @@ function newMemoryBrain(initial: BrainRecord[]): { client: BrainClient; records:
       return Array.from(records.values()).map((r) => ({ ...r, fields: { ...r.fields } }));
     },
     async updateRecord(_schema, key, range, fields) {
-      records.set(key, { key, range, fields: { ...fields } });
+      const current = records.get(key);
+      records.set(key, { key, range, fields: { ...(current?.fields ?? {}), ...fields } });
     },
   };
   return { client, records };
@@ -89,7 +92,13 @@ describe("Brain → LastSecrets migration", () => {
     const plan = await planMigration(deps, TARGETS);
     const log = renderMigrationLog(plan, "plan");
     expect(log).not.toContain(AWS_KEY);
-    expect(log).toContain("<redacted>");
+    expect(log).not.toContain("AKI");
+    expect(log).not.toContain("PLE");
+    expect(log).toContain("<redacted:");
+    const review = renderMigrationReview(plan, new Date("2026-07-13T00:00:00Z"));
+    expect(review).not.toContain(AWS_KEY);
+    expect(review).not.toContain("AKI");
+    expect(review).toContain("\"decision\": \"apply\"");
   });
 
   it("apply stores the secret and replaces the raw value with a locator", async () => {
@@ -122,6 +131,40 @@ describe("Brain → LastSecrets migration", () => {
     expect(stored.secretValue).toBe(AWS_KEY);
   });
 
+  it("applies an uncertain detection only when the review contract explicitly approves it", async () => {
+    const uncertainValue = "uncertainTokenValue123456";
+    const brain = newMemoryBrain([
+      { key: "manual-note", range: null, fields: { body: `token = ${uncertainValue}` } },
+    ]);
+    const secrets = newMemorySecrets();
+    const deps: MigrationDeps = { brain: brain.client, secrets, secretsConfig: SECRETS_CONFIG };
+    const plan = await planMigration(deps, TARGETS);
+
+    const defaultApply = await applyMigration(deps, plan, TARGETS);
+    expect(defaultApply.storedSecrets).toBe(0);
+    expect(brain.records.get("manual-note")!.fields.body).toContain(uncertainValue);
+
+    const review = parseMigrationReview(renderMigrationReview(plan));
+    review.actions[0]!.decision = "apply";
+    const approvedApply = await applyMigration(deps, plan, TARGETS, review);
+    expect(approvedApply.storedSecrets).toBe(1);
+    const body = brain.records.get("manual-note")!.fields.body as string;
+    expect(body).not.toContain(uncertainValue);
+    expect(body).toContain("lastsecrets://");
+  });
+
+  it("ignores already-migrated refs idempotently", async () => {
+    const brain = newMemoryBrain([
+      { key: "already", range: null, fields: { body: "token = lastsecrets://existing-token" } },
+    ]);
+    const deps: MigrationDeps = { brain: brain.client, secrets: newMemorySecrets(), secretsConfig: SECRETS_CONFIG };
+    const plan = await planMigration(deps, TARGETS);
+    const applied = await applyMigration(deps, plan, TARGETS);
+    expect(plan.actions).toHaveLength(0);
+    expect(applied.updatedRecords).toBe(0);
+    expect(brain.records.get("already")!.fields.body).toBe("token = lastsecrets://existing-token");
+  });
+
   it("does not write anything when there are no high-confidence secrets", async () => {
     const brain = newMemoryBrain([
       { key: "misc-note", range: null, fields: { body: "token = someUncertainThing123" } },
@@ -143,6 +186,46 @@ describe("Brain → LastSecrets migration", () => {
     const plan = await planMigration(deps, TARGETS);
     const slugs = plan.actions.map((a) => a.slug);
     expect(new Set(slugs).size).toBe(slugs.length);
+  });
+
+  it("replaces distinct same-rule detections with their own refs", async () => {
+    const otherAwsKey = "AKIAIOSFODNN7ANOTHER";
+    const brain = newMemoryBrain([
+      { key: "same", range: null, fields: { body: `a ${AWS_KEY} and b ${otherAwsKey}` } },
+    ]);
+    const secrets = newMemorySecrets();
+    const deps: MigrationDeps = { brain: brain.client, secrets, secretsConfig: SECRETS_CONFIG };
+    const plan = await planMigration(deps, TARGETS);
+    const applied = await applyMigration(deps, plan, TARGETS);
+    expect(applied.errors).toEqual([]);
+    const body = brain.records.get("same")!.fields.body as string;
+    expect(body).not.toContain(AWS_KEY);
+    expect(body).not.toContain(otherAwsKey);
+    for (const action of plan.actions) {
+      expect(body).toContain(action.ref);
+      const stored = await getSecret(secrets, SECRETS_CONFIG, action.slug);
+      expect([AWS_KEY, otherAwsKey]).toContain(stored.secretValue);
+    }
+  });
+
+  it("redacts raw values from partial-failure errors", async () => {
+    const brain = newMemoryBrain([
+      { key: "deploy-notes", range: null, fields: { body: `aws key ${AWS_KEY}` } },
+    ]);
+    const failingSecrets: LastDbClient = {
+      ...newMemorySecrets(),
+      async createRecord() {
+        throw new Error(`backend rejected ${AWS_KEY}`);
+      },
+    };
+    const deps: MigrationDeps = { brain: brain.client, secrets: failingSecrets, secretsConfig: SECRETS_CONFIG };
+    const plan = await planMigration(deps, TARGETS);
+    const applied = await applyMigration(deps, plan, TARGETS);
+    expect(applied.storedSecrets).toBe(0);
+    expect(applied.updatedRecords).toBe(0);
+    expect(applied.errors).toHaveLength(1);
+    expect(applied.errors[0]!.message).not.toContain(AWS_KEY);
+    expect(renderMigrationLog(plan, "apply", applied)).not.toContain(AWS_KEY);
   });
 
   it("renders a log with staged, review, and untouched sections", async () => {

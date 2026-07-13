@@ -14,11 +14,13 @@ import {
 import { newBrainClient } from "./brain.ts";
 import {
   applyMigration,
+  parseMigrationReview,
   planMigration,
   renderMigrationLog,
+  renderMigrationReview,
   type ScanTarget,
 } from "./migrate.ts";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 type Io = {
   stdout: Pick<typeof process.stdout, "write">;
@@ -163,7 +165,10 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
       const mode = opts.apply ? "apply" : "plan";
       let applied;
       if (opts.apply) {
-        applied = await applyMigration(deps, plan, targets);
+        const review = opts.review ? parseMigrationReview(readFileSync(opts.review, "utf8")) : undefined;
+        applied = await applyMigration(deps, plan, targets, review);
+      } else if (opts.review) {
+        writeFileSync(opts.review, renderMigrationReview(plan), { encoding: "utf8", mode: 0o600 });
       }
       const log = renderMigrationLog(plan, mode, applied);
       if (opts.log) {
@@ -173,6 +178,21 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
         io.stdout.write(`${log}\n`);
       }
       if (applied && applied.errors.length > 0) return 1;
+      return 0;
+    }
+
+    if (command === "guard") {
+      const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
+      if (!opts.file) throw new Error("guard requires --file PATH");
+      if (!opts.valueStdin) throw new Error("guard requires --value-stdin");
+      const raw = await io.stdinText();
+      const text = readFileSync(opts.file, "utf8");
+      const rawWithoutFinalNewline = raw.replace(/\r?\n$/, "");
+      const candidates = [raw, rawWithoutFinalNewline].filter((value) => value.length > 0);
+      if (candidates.some((value) => text.includes(value))) {
+        throw new Error("guard failed: raw secret value found in file");
+      }
+      io.stdout.write(`guard ok: ${opts.file}\n`);
       return 0;
     }
 
@@ -197,6 +217,8 @@ type Options = {
   fields: string[];
   apply?: boolean;
   log?: string;
+  review?: string;
+  file?: string;
 };
 
 function parseOptions(args: string[]): Options {
@@ -231,6 +253,8 @@ function parseOptions(args: string[]): Options {
         .map((f) => f.trim())
         .filter((f) => f.length > 0);
     } else if (key === "log") opts.log = value;
+    else if (key === "review") opts.review = value;
+    else if (key === "file") opts.file = value;
     else throw new Error(`unknown option: --${key}`);
   }
   return opts;
@@ -251,7 +275,8 @@ function usage(): string {
     "       lastsecrets ref <slug>",
     "       lastsecrets list",
     "       lastsecrets search <term>",
-    "       lastsecrets migrate --schema NAME[,NAME] --fields FIELD[,FIELD] [--apply] [--log PATH]",
+    "       lastsecrets migrate --schema NAME[,NAME] --fields FIELD[,FIELD] [--apply] [--log PATH] [--review PATH]",
+    "       lastsecrets guard --file PATH --value-stdin",
   ].join("\n");
 }
 

@@ -58,20 +58,43 @@ references. It never does a broad destructive rewrite.
 The flow is two-phase:
 
 1. **Plan (default, read-only).** Scan the named Brain schema(s)/field(s) for
-   secret material, classify every hit, and print a migration log. Nothing is
-   written.
+   secret material, classify every hit, and write a redacted text log plus a
+   redacted JSON review file. Nothing is written.
 
    ```sh
-   lastsecrets migrate --schema brain/Note --fields body,title --log migration.plan.log
+   lastsecrets migrate --schema brain/Note --fields body,title \
+     --log migration.plan.log \
+     --review migration.review.json
    ```
 
-2. **Apply (`--apply`).** Execute only the **high-confidence** staged actions:
-   store each secret through LastSecrets, then replace the raw value in the
-   owning Brain record with its `lastsecrets://` locator. Uncertain detections
-   are left untouched.
+2. **Review.** Inspect `migration.plan.log` and `migration.review.json`.
+   High-confidence actions are marked `"decision": "apply"` by default.
+   Uncertain detections are marked `"decision": "review"` and are never applied
+   unless an operator explicitly changes that one action to `"apply"` after
+   validating it out of band. Use `"skip"` for candidates that must remain
+   untouched.
+
+3. **Apply (`--apply`).** Re-scan the same Brain targets, read the review file,
+   and execute only entries whose redacted action id/ref/preview still match and
+   whose decision is `"apply"`: store each secret through LastSecrets, then
+   replace the raw value in the owning Brain record with its `lastsecrets://`
+   locator.
 
    ```sh
-   lastsecrets migrate --schema brain/Note --fields body,title --apply --log migration.apply.log
+   lastsecrets migrate --schema brain/Note --fields body,title \
+     --apply \
+     --review migration.review.json \
+     --log migration.apply.log
+   ```
+
+4. **Guard artifacts before sharing.** Check every generated plan/log/review file
+   against any throwaway raw value handled during a test run. Pass the value on
+   stdin so it does not appear in shell history, process lists, or command logs.
+
+   ```sh
+   printf '%s' "$THROWAWAY_VALUE" | lastsecrets guard --file migration.plan.log --value-stdin
+   printf '%s' "$THROWAWAY_VALUE" | lastsecrets guard --file migration.review.json --value-stdin
+   printf '%s' "$THROWAWAY_VALUE" | lastsecrets guard --file migration.apply.log --value-stdin
    ```
 
 Classification:
@@ -89,7 +112,21 @@ Placeholders (`<redacted>`, `${ENV_VAR}`, `changeme`, already-migrated
 The migration log records, for every scanned record: what was **staged**, what
 **needs review**, and what was **intentionally left untouched** — and, after an
 apply, how many secrets were stored, how many records were updated, and any
-errors. Raw secret values never appear in the log (previews are redacted).
+errors. Raw secret values never appear in the log or review JSON; previews are
+length-only redactions such as `<redacted:40 chars>`.
+
+Operator-safe runbook for a real Brain migration:
+
+- Use a narrow schema/field set first; do not run a broad Brain rewrite without
+  a reviewed plan.
+- Keep plan, review, and apply artifacts local with restrictive file modes.
+- Store raw values only through LastSecrets at apply time. Do not paste them into
+  Brain, Kanban, PR descriptions, docs, screenshots, or terminal snippets.
+- Record durable evidence as counts, `lastsecrets://` refs, and residual manual
+  review classes only. Do not record raw values or redacted fragments that reveal
+  token prefixes/suffixes.
+- Leave unresolved `"review"` or `"skip"` actions as an explicit manual-review
+  remainder; do not silently rewrite uncertain candidates.
 
 ## Threat Model
 

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { run } from "../src/cli.ts";
 
@@ -17,6 +20,20 @@ describe("LastSecrets CLI pure commands", () => {
     expect(code).toBe(1);
     expect(io.err()).toContain("invalid LastSecrets slug");
     expect(io.err()).not.toContain("sk-live-do-not-print");
+  });
+
+  it("guards generated fixtures using stdin without echoing the raw value", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lastsecrets-guard-"));
+    const fixture = join(dir, "migration.plan.log");
+    const raw = "sk-live-guard-fixture-value";
+    writeFileSync(fixture, "record=brain-note value=<redacted:27 chars>\n", { mode: 0o600 });
+
+    const io = captureIo(raw);
+    const code = await run(["guard", "--file", fixture, "--value-stdin"], io);
+    expect(code).toBe(0);
+    expect(io.out()).toContain("guard ok:");
+    expect(io.out()).not.toContain(raw);
+    expect(io.err()).toBe("");
   });
 });
 

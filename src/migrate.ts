@@ -34,12 +34,16 @@ export type ScanTarget = {
 
 /** One planned unit of migration work for a single detected secret. */
 export type PlannedAction = {
+  /** Stable redacted action id used by review/apply handoff. */
+  actionId: string;
   recordKey: string;
   recordRange: string | null;
   /** Field on the record whose text contains the secret. */
   field: string;
   rule: string;
   confidence: Confidence;
+  /** Occurrence of this rule inside the record field; disambiguates same-rule hits. */
+  occurrence: number;
   /** Slug the secret will be stored under in LastSecrets. */
   slug: string;
   /** `lastsecrets://<slug>` the raw value is replaced by. */
@@ -68,7 +72,7 @@ export type MigrationPlan = {
 export type ApplyResult = {
   storedSecrets: number;
   updatedRecords: number;
-  stagedButSkipped: number; // needs-review actions never applied
+  stagedButSkipped: number; // actions not approved for this apply run
   errors: { recordKey: string; slug: string; message: string }[];
 };
 
@@ -81,6 +85,25 @@ export type SlugStrategy = {
   environment: string;
 };
 
+export type MigrationReviewDecision = "apply" | "review" | "skip";
+
+export type MigrationReviewAction = {
+  actionId: string;
+  recordKey: string;
+  field: string;
+  rule: string;
+  confidence: Confidence;
+  ref: string;
+  preview: string;
+  decision: MigrationReviewDecision;
+};
+
+export type MigrationReview = {
+  version: 1;
+  generatedAt: string;
+  actions: MigrationReviewAction[];
+};
+
 export type MigrationDeps = {
   brain: BrainClient;
   secrets: LastDbClient;
@@ -91,8 +114,6 @@ export type MigrationDeps = {
    */
   slugFor?: (record: BrainRecord, detection: Detection, field: string) => SlugStrategy;
 };
-
-const REDACT = "<redacted>";
 
 /**
  * Build a migration plan by scanning the given targets. Read-only: performs no
@@ -114,17 +135,23 @@ export async function planMigration(deps: MigrationDeps, targets: ScanTarget[]):
         const text = stringField(record.fields, field);
         if (!text) continue;
         const detections = detectSecrets(text);
+        const occurrenceByRule = new Map<string, number>();
         for (const detection of detections) {
           recordHadDetection = true;
+          const occurrence = occurrenceByRule.get(detection.rule) ?? 0;
+          occurrenceByRule.set(detection.rule, occurrence + 1);
           const strategy = uniqueSlug(slugFor(record, detection, field), usedSlugs);
           usedSlugs.add(strategy.slug);
           const ref = secretRef(strategy.slug);
+          const actionId = actionIdFor(record.key, field, detection.rule, occurrence);
           actions.push({
+            actionId,
             recordKey: record.key,
             recordRange: record.range,
             field,
             rule: detection.rule,
             confidence: detection.confidence,
+            occurrence,
             slug: strategy.slug,
             ref,
             disposition: detection.confidence === "high" ? "stage" : "needs-review",
@@ -142,10 +169,11 @@ export async function planMigration(deps: MigrationDeps, targets: ScanTarget[]):
 }
 
 /**
- * Apply a plan. Only actions with disposition "stage" are executed; each stores
- * its secret through LastSecrets, then replaces the raw value in the owning
- * Brain record with the `lastsecrets://` locator. "needs-review" actions are
- * counted and skipped — never rewritten without human review.
+ * Apply a plan. Without a review file, only high-confidence "stage" actions
+ * run. With a review file, only actions explicitly marked "apply" run; this is
+ * the only path for needs-review detections. Each applied action stores its
+ * secret through LastSecrets, then replaces the raw value in the owning Brain
+ * record with the `lastsecrets://` locator.
  *
  * Applying is idempotent per record: all replacements for a record are computed
  * against the freshly re-read field text and written in a single update.
@@ -154,9 +182,10 @@ export async function applyMigration(
   deps: MigrationDeps,
   plan: MigrationPlan,
   targets: ScanTarget[],
+  review?: MigrationReview,
 ): Promise<ApplyResult> {
   const result: ApplyResult = { storedSecrets: 0, updatedRecords: 0, stagedButSkipped: 0, errors: [] };
-  const stageable = plan.actions.filter((a) => a.disposition === "stage");
+  const stageable = actionsApprovedForApply(plan, review);
   result.stagedButSkipped = plan.actions.length - stageable.length;
   if (stageable.length === 0) return result;
 
@@ -217,7 +246,7 @@ export async function applyMigration(
     }
 
     // Compute in-place field replacements for stored secrets only.
-    const updatedFields: Record<string, unknown> = { ...record.fields };
+    const updatedFields: Record<string, unknown> = {};
     let changed = false;
     const byField = new Map<string, PlannedAction[]>();
     for (const action of recordActions) {
@@ -228,9 +257,10 @@ export async function applyMigration(
     }
     for (const [field, fieldActions] of byField) {
       let text = stringField(record.fields, field);
+      const rawValues = extractDetectionValues(text, fieldActions);
       for (const action of fieldActions) {
-        const rawValue = extractDetectionValue(text, action);
-        if (rawValue == null) continue;
+        const rawValue = rawValues.get(action.actionId);
+        if (!rawValue) continue;
         text = text.split(rawValue).join(action.ref);
         changed = true;
       }
@@ -266,6 +296,62 @@ export function defaultSlugStrategy(record: BrainRecord, detection: Detection, f
   };
 }
 
+/** Render a redacted JSON review contract. Operators may change `review` to `apply` or `skip`. */
+export function renderMigrationReview(plan: MigrationPlan, now = new Date()): string {
+  const review: MigrationReview = {
+    version: 1,
+    generatedAt: now.toISOString(),
+    actions: plan.actions.map((a) => ({
+      actionId: a.actionId,
+      recordKey: a.recordKey,
+      field: a.field,
+      rule: a.rule,
+      confidence: a.confidence,
+      ref: a.ref,
+      preview: a.preview,
+      decision: a.disposition === "stage" ? "apply" : "review",
+    })),
+  };
+  return `${JSON.stringify(review, null, 2)}\n`;
+}
+
+export function parseMigrationReview(text: string): MigrationReview {
+  const parsed = JSON.parse(text) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("migration review must be a JSON object");
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.version !== 1) throw new Error("unsupported migration review version");
+  if (!Array.isArray(obj.actions)) throw new Error("migration review missing actions");
+  const actions: MigrationReviewAction[] = [];
+  for (const raw of obj.actions) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("invalid migration review action");
+    }
+    const r = raw as Record<string, unknown>;
+    const decision = r.decision;
+    if (decision !== "apply" && decision !== "review" && decision !== "skip") {
+      throw new Error("invalid migration review decision");
+    }
+    const action: MigrationReviewAction = {
+      actionId: requireReviewString(r, "actionId"),
+      recordKey: requireReviewString(r, "recordKey"),
+      field: requireReviewString(r, "field"),
+      rule: requireReviewString(r, "rule"),
+      confidence: requireReviewConfidence(r.confidence),
+      ref: requireReviewString(r, "ref"),
+      preview: requireReviewString(r, "preview"),
+      decision,
+    };
+    actions.push(action);
+  }
+  return {
+    version: 1,
+    generatedAt: typeof obj.generatedAt === "string" ? obj.generatedAt : "",
+    actions,
+  };
+}
+
 /** Render a plan as a stable, human-reviewable text migration log. */
 export function renderMigrationLog(plan: MigrationPlan, mode: "plan" | "apply", applied?: ApplyResult): string {
   const lines: string[] = [];
@@ -289,7 +375,7 @@ export function renderMigrationLog(plan: MigrationPlan, mode: "plan" | "apply", 
   if (staged.length === 0) lines.push("(none)");
   for (const a of staged) {
     lines.push(
-      `- STAGE record=${a.recordKey} field=${a.field} rule=${a.rule} -> ${a.ref} value=${a.preview}`,
+      `- STAGE id=${a.actionId} record=${a.recordKey} field=${a.field} rule=${a.rule} -> ${a.ref} value=${a.preview}`,
     );
   }
   lines.push("");
@@ -298,7 +384,7 @@ export function renderMigrationLog(plan: MigrationPlan, mode: "plan" | "apply", 
   if (review.length === 0) lines.push("(none)");
   for (const a of review) {
     lines.push(
-      `- REVIEW record=${a.recordKey} field=${a.field} rule=${a.rule} candidate_ref=${a.ref} value=${a.preview}`,
+      `- REVIEW id=${a.actionId} record=${a.recordKey} field=${a.field} rule=${a.rule} candidate_ref=${a.ref} value=${a.preview}`,
     );
   }
   lines.push("");
@@ -340,11 +426,26 @@ function buildSecretInput(action: PlannedAction, value: string): SecretInput {
  * carries the plaintext secret around in the plan.
  */
 function extractDetectionValue(text: string, action: PlannedAction): string | null {
-  const detections = detectSecrets(text);
-  for (const d of detections) {
-    if (d.rule === action.rule) return d.value;
+  return extractDetectionValues(text, [action]).get(action.actionId) ?? null;
+}
+
+function extractDetectionValues(text: string, actions: PlannedAction[]): Map<string, string> {
+  const byRule = new Map<string, PlannedAction[]>();
+  for (const action of actions) {
+    const list = byRule.get(action.rule) ?? [];
+    list.push(action);
+    byRule.set(action.rule, list);
   }
-  return null;
+
+  const occurrenceByRule = new Map<string, number>();
+  const matched = new Map<string, string>();
+  for (const detection of detectSecrets(text)) {
+    const occurrence = occurrenceByRule.get(detection.rule) ?? 0;
+    occurrenceByRule.set(detection.rule, occurrence + 1);
+    const action = byRule.get(detection.rule)?.find((a) => a.occurrence === occurrence);
+    if (action) matched.set(action.actionId, detection.value);
+  }
+  return matched;
 }
 
 function providerFromRule(rule: string): string {
@@ -359,8 +460,7 @@ function providerFromRule(rule: string): string {
 }
 
 function previewOf(value: string): string {
-  if (value.length <= 6) return REDACT;
-  return `${value.slice(0, 3)}${REDACT}${value.slice(-2)}`;
+  return `<redacted:${value.length} chars>`;
 }
 
 function stringField(fields: Record<string, unknown>, key: string): string {
@@ -386,4 +486,38 @@ function uniqueSlug(strategy: SlugStrategy, used: Set<string>): SlugStrategy {
     candidate = `${strategy.slug}-${n}`;
   }
   return { ...strategy, slug: candidate };
+}
+
+function actionIdFor(recordKey: string, field: string, rule: string, occurrence: number): string {
+  return slugify(`${recordKey}-${field}-${rule}-${occurrence + 1}`);
+}
+
+function actionsApprovedForApply(plan: MigrationPlan, review?: MigrationReview): PlannedAction[] {
+  if (!review) return plan.actions.filter((a) => a.disposition === "stage");
+  const byId = new Map(review.actions.map((a) => [a.actionId, a]));
+  return plan.actions.filter((action) => {
+    const approved = byId.get(action.actionId);
+    if (!approved) return false;
+    if (approved.decision !== "apply") return false;
+    return (
+      approved.recordKey === action.recordKey &&
+      approved.field === action.field &&
+      approved.rule === action.rule &&
+      approved.ref === action.ref &&
+      approved.preview === action.preview
+    );
+  });
+}
+
+function requireReviewString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`migration review action missing ${key}`);
+  }
+  return value;
+}
+
+function requireReviewConfidence(value: unknown): Confidence {
+  if (value === "high" || value === "uncertain") return value;
+  throw new Error("migration review action has invalid confidence");
 }
