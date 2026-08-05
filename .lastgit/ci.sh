@@ -11,12 +11,18 @@ for f in .lastgit/*.sh scripts/*.sh; do
   bash -n "$f"
 done
 
+echo "== dependencies =="
+bun install --frozen-lockfile
+
 echo "== typecheck / build =="
 for f in src/*.ts test/*.ts; do
   [ -e "$f" ] || continue
   echo "bun build $f"
   bun build "$f" --target=bun --outfile=/dev/null
 done
+
+echo "== artifact build =="
+bun run build
 
 echo "== unit tests =="
 bun test
