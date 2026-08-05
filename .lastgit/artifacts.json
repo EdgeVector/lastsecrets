@@ -1,0 +1,10 @@
+{
+  "artifacts": [
+    {
+      "app": "lastsecrets",
+      "paths": [
+        "dist"
+      ]
+    }
+  ]
+}
