@@ -1,0 +1,11 @@
+name: ci.yml (mirror-inert)
+
+# GitHub is a private read-only mirror. LastGit is source of truth.
+on:
+  workflow_dispatch:
+
+jobs:
+  inert:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "GitHub mirror — no Actions. Use LastGit lastdb:///lastsecrets + code-node forge."
