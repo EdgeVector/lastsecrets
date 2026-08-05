@@ -2,9 +2,7 @@
   "artifacts": [
     {
       "app": "lastsecrets",
-      "paths": [
-        "dist"
-      ]
+      "paths": ["bin", "dist"]
     }
   ]
 }
