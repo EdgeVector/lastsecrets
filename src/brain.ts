@@ -31,14 +31,21 @@ export type BrainRecord = {
   fields: Record<string, unknown>;
 };
 
+export type BrainKey = {
+  hash: string;
+  range: string | null;
+};
+
 export type BrainClient = {
-  /** All records for a schema, addressed by schema name or hash. */
-  queryAll(schema: string, fields: string[]): Promise<BrainRecord[]>;
+  /** Page through the live keys for a schema without loading atom bodies. */
+  listKeys(schema: string): Promise<BrainKey[]>;
+  /** Read one live record by its exact key. */
+  queryByKey(schema: string, key: BrainKey, fields: string[]): Promise<BrainRecord | null>;
   /** Replace the field bag for a single record (targeted update, not mass rewrite). */
   updateRecord(schema: string, key: string, range: string | null, fields: Record<string, unknown>): Promise<void>;
 };
 
-const QUERY_PAGE_SIZE = 1000;
+const LIST_PAGE_SIZE = 1000;
 const FBRAIN_APP_ID = "fbrain";
 const noopCapabilityStore: CapabilityStore = {
   async store() {},
@@ -52,13 +59,14 @@ export function newBrainClient(opts: {
   nodeUrl?: string;
   userHash: string;
   socketPath?: string;
+  transport?: SdkTransport;
 }): BrainClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPath);
   const defaultHeaders = { "X-User-Hash": opts.userHash, "X-LastDB-Client": "lastsecrets" };
-  const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
+  const sdkTransport: SdkTransport = opts.transport ?? (isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
-    : httpTransport(nodeUrl, defaultHeaders);
+    : httpTransport(nodeUrl, defaultHeaders));
   const sdkStoreKey = capabilityStoreKey(FBRAIN_APP_ID, sdkTransport.target);
   let sdkClient: SdkLastDbClient | null = null;
   const dataClient = (): SdkLastDbClient => {
@@ -81,12 +89,48 @@ export function newBrainClient(opts: {
     }
   };
 
+  const transportDataPath = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw mapSdkError(err, nodeUrl, socketPath);
+    }
+  };
+
   return {
-    async queryAll(schema, fields) {
-      const result = await sdkDataPath((client) =>
-        client.queryAll(schema, { fields }, { pageSize: QUERY_PAGE_SIZE }),
-      );
-      return result.rows.map(sdkRowToBrainRecord);
+    async listKeys(schema) {
+      return transportDataPath(async () => {
+        const keys: BrainKey[] = [];
+        let cursor: string | null = null;
+        do {
+          const params = new URLSearchParams({ schema, limit: String(LIST_PAGE_SIZE) });
+          if (cursor) params.set("cursor", cursor);
+          const response = await sdkTransport.send("GET", `/api/list?${params.toString()}`);
+          if (response.status !== 200) {
+            throw new UnexpectedResponseError(
+              `brain list returned ${response.status}`,
+              response.status,
+              response.body,
+            );
+          }
+          const page = parseListPage(response.body);
+          keys.push(...page.keys);
+          if (!page.hasMore) break;
+          if (!page.nextCursor || page.nextCursor === cursor) {
+            throw new Error("brain list pagination stalled: missing or repeated next_cursor");
+          }
+          cursor = page.nextCursor;
+        } while (true);
+        return keys;
+      });
+    },
+    async queryByKey(schema, key, fields) {
+      const filter: JsonValue = key.range === null
+        ? { HashKey: key.hash }
+        : { HashRangeKey: { hash: key.hash, range: key.range } };
+      const result = await sdkDataPath((client) => client.query(schema, { fields, filter }));
+      const row = result.rows[0];
+      return row ? sdkRowToBrainRecord(row) : null;
     },
     async updateRecord(schema, key, range, fields) {
       await sdkDataPath((client) =>
@@ -98,6 +142,39 @@ export function newBrainClient(opts: {
       );
     },
   };
+}
+
+function parseListPage(body: unknown): {
+  keys: BrainKey[];
+  hasMore: boolean;
+  nextCursor: string | null;
+} {
+  const root = asRecord(body);
+  const page = asRecord(root?.list);
+  if (!page || !Array.isArray(page.keys)) {
+    throw new Error("brain list response is missing list.keys");
+  }
+  const keys = page.keys.map((value, index) => {
+    const key = asRecord(value);
+    if (!key || typeof key.hash !== "string" || key.hash.length === 0) {
+      throw new Error(`brain list response has an invalid key at index ${index}`);
+    }
+    if (key.range !== undefined && key.range !== null && typeof key.range !== "string") {
+      throw new Error(`brain list response has an invalid range at index ${index}`);
+    }
+    return { hash: key.hash, range: typeof key.range === "string" ? key.range : null };
+  });
+  return {
+    keys,
+    hasMore: page.has_more === true,
+    nextCursor: typeof page.next_cursor === "string" ? page.next_cursor : null,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function sdkRowToBrainRecord(row: SdkQueryRow): BrainRecord {
