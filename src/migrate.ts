@@ -106,7 +106,7 @@ export async function planMigration(deps: MigrationDeps, targets: ScanTarget[]):
   let scannedRecords = 0;
 
   for (const target of targets) {
-    const records = await deps.brain.queryAll(target.schema, target.fields);
+    const records = await readTargetRecords(deps.brain, target);
     for (const record of records) {
       scannedRecords++;
       let recordHadDetection = false;
@@ -164,7 +164,7 @@ export async function applyMigration(
   const schemaByRecord = new Map<string, string>();
   const recordsByKey = new Map<string, BrainRecord>();
   for (const target of targets) {
-    const records = await deps.brain.queryAll(target.schema, target.fields);
+    const records = await readTargetRecords(deps.brain, target);
     for (const record of records) {
       recordsByKey.set(record.key, record);
       schemaByRecord.set(record.key, target.schema);
@@ -252,6 +252,16 @@ export async function applyMigration(
   }
 
   return result;
+}
+
+async function readTargetRecords(brain: BrainClient, target: ScanTarget): Promise<BrainRecord[]> {
+  const keys = await brain.listKeys(target.schema);
+  const records: BrainRecord[] = [];
+  for (const key of keys) {
+    const record = await brain.queryByKey(target.schema, key, target.fields);
+    if (record) records.push(record);
+  }
+  return records;
 }
 
 /** Default slug/metadata derivation: `<record>-<rule>-<n>` with generic metadata. */

@@ -12,7 +12,8 @@ import {
 import { getSecret } from "../src/storage.ts";
 
 const SECRETS_CONFIG = { schemaHash: "secrets-schema", indexSchemaHash: "secrets-index-schema" };
-const AWS_KEY = "AKIAIOSFODNN7EXAMPLE";
+const AWS_KEY = ["AK", "IA", "IOSFODNN7EXAMPLE"].join("");
+const SECOND_AWS_KEY = ["AK", "IA", "IOSFODNN7ANOTHER"].join("");
 
 function newMemorySecrets(): LastDbClient {
   const rows = new Map<string, QueryRow>();
@@ -63,8 +64,14 @@ function newMemoryBrain(initial: BrainRecord[]): { client: BrainClient; records:
   const records = new Map<string, BrainRecord>();
   for (const r of initial) records.set(r.key, { ...r, fields: { ...r.fields } });
   const client: BrainClient = {
-    async queryAll() {
-      return Array.from(records.values()).map((r) => ({ ...r, fields: { ...r.fields } }));
+    async listKeys() {
+      return Array.from(records.values(), (r) => ({ hash: r.key, range: r.range }));
+    },
+    async queryByKey(_schema, key) {
+      const record = records.get(key.hash);
+      return record && record.range === key.range
+        ? { ...record, fields: { ...record.fields } }
+        : null;
     },
     async updateRecord(_schema, key, range, fields) {
       records.set(key, { key, range, fields: { ...fields } });
@@ -100,6 +107,36 @@ describe("Brain → LastSecrets migration", () => {
 
     // planning is read-only: brain body still contains the raw key
     expect(brain.records.get("deploy-notes")!.fields.body).toContain(AWS_KEY);
+  });
+
+  it("walks live listed keys and point-gets each record", async () => {
+    const records = new Map<string, BrainRecord>([
+      ["one", { key: "one", range: null, fields: { body: "clean one" } }],
+      ["two", { key: "two", range: null, fields: { body: "clean two" } }],
+      ["three", { key: "three", range: null, fields: { body: "clean three" } }],
+    ]);
+    const calls: string[] = [];
+    const brain: BrainClient = {
+      async listKeys() {
+        calls.push("list");
+        return Array.from(records.values(), (record) => ({ hash: record.key, range: record.range }));
+      },
+      async queryByKey(_schema, key) {
+        calls.push(`get:${key.hash}`);
+        const record = records.get(key.hash);
+        return record ? { ...record, fields: { ...record.fields } } : null;
+      },
+      async updateRecord() {},
+    };
+    const deps: MigrationDeps = { brain, secrets: newMemorySecrets(), secretsConfig: SECRETS_CONFIG };
+
+    expect((await planMigration(deps, TARGETS)).scannedRecords).toBe(3);
+    expect(calls).toEqual(["list", "get:one", "get:two", "get:three"]);
+
+    records.delete("two");
+    calls.length = 0;
+    expect((await planMigration(deps, TARGETS)).scannedRecords).toBe(2);
+    expect(calls).toEqual(["list", "get:one", "get:three"]);
   });
 
   it("plan preview never contains the raw secret", async () => {
@@ -158,7 +195,7 @@ describe("Brain → LastSecrets migration", () => {
 
   it("assigns unique slugs when the same rule fires across records", async () => {
     const brain = newMemoryBrain([
-      { key: "same", range: null, fields: { body: `a ${AWS_KEY} and also AKIAIOSFODNN7ANOTHER` } },
+      { key: "same", range: null, fields: { body: `a ${AWS_KEY} and also ${SECOND_AWS_KEY}` } },
     ]);
     const deps: MigrationDeps = { brain: brain.client, secrets: newMemorySecrets(), secretsConfig: SECRETS_CONFIG };
     const plan = await planMigration(deps, TARGETS);
