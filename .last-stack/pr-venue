@@ -1,3 +1,4 @@
-lastgit
-# Gate of record: LastGit lastdb:///lastsecrets (code node).
-# GitHub is the public install mirror (not the merge venue).
+forgejo
+# Gate of record for EdgeVector/lastsecrets: Forgejo (http://localhost:3300), Tom 2026-09-06.
+# The LastGit repo lastdb:///lastsecrets is disabled: no CRs, no pushes. Workflow: sop-forge-pr-workflow.
+# Decision: decision-2026-09-06-all-repos-venue-forgejo-no-lastgit-default.
