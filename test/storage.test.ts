@@ -32,6 +32,32 @@ describe("LastSecrets storage", () => {
     expect(fetched.secretValue).toBe(RAW_SECRET);
   });
 
+  // A stored empty value must not read as a successful fetch. Callers act on the
+  // exit code and on stdout; an empty value with a success answer is
+  // indistinguishable from a real secret that happens to be empty, and every
+  // caller then proceeds with nothing.
+  it("refuses a stored empty value instead of answering with success", async () => {
+    const client = newMemoryClient();
+    await client.createRecord({
+      schemaHash: CONFIG.schemaHash,
+      keyHash: "blank-token",
+      fields: {
+        slug: "blank-token",
+        label: "Blank token",
+        provider: "example",
+        purpose: "regression",
+        environment: "dev",
+        secret_value: { value: "" },
+        created_at: "2026-09-07T00:00:00.000Z",
+        updated_at: "2026-09-07T00:00:00.000Z",
+      },
+    });
+
+    await expect(getSecret(client, CONFIG, "blank-token")).rejects.toThrow(
+      "secret has no value: blank-token",
+    );
+  });
+
   it("lists and searches only metadata fields", async () => {
     const client = newMemoryClient();
     await putSecret(client, CONFIG, {

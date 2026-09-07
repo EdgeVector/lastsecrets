@@ -278,17 +278,49 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
   }
 }
 
-export async function initCliSentry(): Promise<void> {
-  if (!process.env.OBS_SENTRY_DSN?.trim()) {
-    return;
+export type CliSentryBootstrap =
+  | { initialized: true }
+  | { initialized: false; reason: "no_dsn" | "unresolved_locator" | "init_failed" };
+
+// Telemetry setup is never the command. Every path here returns a reason; none
+// of them throws. `lastsecrets get <slug>` used to exit 1 with empty stdout for
+// every caller whose environment carried OBS_SENTRY_DSN, because this function
+// threw before `run()` started and the top-level catch turned a telemetry
+// problem into a failed secret lookup.
+export async function initCliSentry(
+  env: Record<string, string | undefined> = process.env,
+  stderr: Pick<typeof process.stderr, "write"> = process.stderr,
+): Promise<CliSentryBootstrap> {
+  const dsn = env.OBS_SENTRY_DSN?.trim();
+  if (!dsn) {
+    return { initialized: false, reason: "no_dsn" };
   }
-  await initSentry({
-    service: "lastsecrets-cli",
-    env: {
-      ...process.env,
-      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `lastsecrets@${pkg.version}`,
-    },
-  });
+
+  // An unresolved `lastsecrets://` locator is a reference to a DSN, not a DSN.
+  // Initializing on it cannot work, and the resolver that would expand it is
+  // this same CLI. Say so once and carry on.
+  if (dsn.startsWith("lastsecrets://")) {
+    stderr.write(
+      "lastsecrets: OBS_SENTRY_DSN is an unresolved lastsecrets:// locator; skipping Sentry init\n",
+    );
+    return { initialized: false, reason: "unresolved_locator" };
+  }
+
+  try {
+    await initSentry({
+      service: "lastsecrets-cli",
+      env: {
+        ...env,
+        OBS_SENTRY_RELEASE: env.OBS_SENTRY_RELEASE ?? `lastsecrets@${pkg.version}`,
+      },
+    });
+    return { initialized: true };
+  } catch (err) {
+    stderr.write(
+      `lastsecrets: Sentry init skipped: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return { initialized: false, reason: "init_failed" };
+  }
 }
 
 async function prepareStorage(configPath?: string): Promise<{

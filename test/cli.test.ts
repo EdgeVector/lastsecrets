@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { run } from "../src/cli.ts";
+import { initCliSentry, run } from "../src/cli.ts";
 import { initSentry, type SentryModule } from "../src/observability/sentry.ts";
 
 describe("LastSecrets CLI pure commands", () => {
@@ -55,6 +55,82 @@ describe("LastSecrets CLI pure commands", () => {
       command: "get",
     });
     expect(String((captured[0]?.error as Error).message)).not.toContain("prod-api-key");
+  });
+});
+
+// A telemetry variable must never decide whether a credential resolves. On
+// 2026-09-07 OBS_SENTRY_DSN in the routinesd LaunchAgent made every
+// `lastsecrets get` inside the daemon fail, which starved the claude OAuth
+// token and stopped the whole routine fleet for 3h15m.
+describe("Sentry bootstrap never fails the command", () => {
+  it("skips an unresolved lastsecrets:// locator and says so on stderr", async () => {
+    let stderr = "";
+    const result = await initCliSentry(
+      { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
+      {
+        write: (chunk: string) => {
+          stderr += chunk;
+          return true;
+        },
+      },
+    );
+    expect(result).toEqual({ initialized: false, reason: "unresolved_locator" });
+    expect(stderr).toContain("unresolved lastsecrets:// locator");
+  });
+
+  it("reports a reason instead of throwing when the Sentry module is missing", async () => {
+    let stderr = "";
+    const result = await initCliSentry({ OBS_SENTRY_DSN: "https://example.invalid/1" }, {
+      write: (chunk: string) => {
+        stderr += chunk;
+        return true;
+      },
+    });
+    // The module either loads or it does not. Neither outcome may throw.
+    if (result.initialized) {
+      expect(stderr).toBe("");
+    } else {
+      expect(result.reason).toBe("init_failed");
+      expect(stderr).toContain("Sentry init skipped");
+    }
+  });
+
+  it("stays silent and reports no_dsn when the variable is absent or blank", async () => {
+    let stderr = "";
+    const write = (chunk: string) => {
+      stderr += chunk;
+      return true;
+    };
+    expect(await initCliSentry({}, { write })).toEqual({
+      initialized: false,
+      reason: "no_dsn",
+    });
+    expect(await initCliSentry({ OBS_SENTRY_DSN: "   " }, { write })).toEqual({
+      initialized: false,
+      reason: "no_dsn",
+    });
+    expect(stderr).toBe("");
+  });
+
+  it("resolves a secret with an unresolved locator in the environment", async () => {
+    const io = captureIo("");
+    let stderr = "";
+    const bootstrap = await initCliSentry(
+      { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
+      {
+        write: (chunk: string) => {
+          stderr += chunk;
+          return true;
+        },
+      },
+    );
+    expect(bootstrap.initialized).toBe(false);
+
+    // The bootstrap did not throw, so the command still runs and still answers
+    // on its own terms. `ref` is the pure command that proves the sequence.
+    const code = await run(["ref", "claude-code-oauth-token"], io);
+    expect(code).toBe(0);
+    expect(io.out()).toBe("lastsecrets://claude-code-oauth-token\n");
   });
 });
 

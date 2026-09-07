@@ -112,7 +112,16 @@ export async function getSecret(
     fields: SECRET_FIELDS,
   });
   if (!row) throw new Error(`secret not found: ${slug}`);
-  return rowToSecret(row);
+  const secret = rowToSecret(row);
+  // An empty value is not a successful fetch. Callers read stdout and act on the
+  // exit code, so answering 0 with nothing on stdout tells every caller the
+  // secret resolved to the empty string, and no caller can tell that apart from
+  // a real empty secret. That reading starved the routinesd claude token and
+  // stopped the routine fleet for 3h15m on 2026-09-07.
+  if (secret.secretValue.length === 0) {
+    throw new Error(`secret has no value: ${slug}`);
+  }
+  return secret;
 }
 
 export async function listSecrets(
