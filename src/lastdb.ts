@@ -158,10 +158,12 @@ export function newLastDbClient(opts: {
   userHash?: string;
   socketPath?: string;
   fetchImpl?: FetchLike;
+  queryTimeoutMs?: number;
 } = {}): LastDbClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
+  const queryTimeoutMs = opts.queryTimeoutMs ?? 30_000; // 30s default timeout
   const defaultHeaders: Record<string, string> = {
     "X-LastDB-Client": "lastsecrets",
     ...(opts.userHash ? { "X-User-Hash": opts.userHash } : {}),
@@ -185,7 +187,7 @@ export function newLastDbClient(opts: {
 
   const sdkDataPath = async <T>(fn: (client: SdkLastDbClient) => Promise<T>): Promise<T> => {
     try {
-      return await fn(dataClient());
+      return await withTimeout(fn(dataClient()), queryTimeoutMs);
     } catch (err) {
       throw mapSdkError(err, nodeUrl, socketPath);
     }
@@ -210,13 +212,17 @@ export function newLastDbClient(opts: {
     const url = socket ? `http://localhost${path}` : `${nodeUrl}${path}`;
     let response: Response;
     try {
-      response = await fetchImpl(url, {
+      const fetchPromise = fetchImpl(url, {
         method,
         headers,
         body: requestBody,
         ...(socket ? { unix: socket } : {}),
       });
+      response = await withTimeout(fetchPromise, queryTimeoutMs);
     } catch (err) {
+      if (err instanceof LastSecretsError && err.code === "query_timeout") {
+        throw err;
+      }
       throw new LastSecretsError(
         "service_unreachable",
         socket
@@ -508,4 +514,22 @@ function declareSchemaName(body: unknown, appId: string, localName: string): str
 
 export function redactKnownSecretWords(value: string): string {
   return value.replace(/(secret_value|value|token|password|credential)=\S+/gi, "$1=<redacted>");
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(
+      () =>
+        reject(
+          new LastSecretsError(
+            "query_timeout",
+            `LastDB query did not complete within ${timeoutMs}ms`,
+          ),
+        ),
+      timeoutMs,
+    );
+    promise
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timeoutId));
+  });
 }

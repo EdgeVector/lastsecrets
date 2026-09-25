@@ -1,7 +1,85 @@
 import { describe, expect, it } from "bun:test";
 
-import { newLastDbClient } from "../src/lastdb.ts";
+import { LastSecretsError, newLastDbClient } from "../src/lastdb.ts";
 import { lastSecretSchema } from "../src/schema.ts";
+
+describe("LastDB client query timeout", () => {
+  it("times out admin operations like declareAppSchema when LastDB does not respond", async () => {
+    let fetchCalled = false;
+    const client = newLastDbClient({
+      userHash: "user",
+      socketPath: "/tmp/folddb.sock",
+      queryTimeoutMs: 100, // 100ms timeout for testing
+      fetchImpl: async () => {
+        fetchCalled = true;
+        // Simulate a hanging request
+        return new Promise(() => {});
+      },
+    });
+
+    const start = Date.now();
+    try {
+      await client.declareAppSchema("lastsecrets", lastSecretSchema.schema);
+      throw new Error("Expected declareAppSchema to throw");
+    } catch (err) {
+      const elapsed = Date.now() - start;
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).toContain("did not complete within");
+      expect(fetchCalled).toBe(true);
+      expect(elapsed).toBeGreaterThanOrEqual(100);
+      expect(elapsed).toBeLessThan(500);
+    }
+  });
+
+  it("does not timeout when operations complete within the timeout window", async () => {
+    const client = newLastDbClient({
+      userHash: "user",
+      socketPath: "/tmp/folddb.sock",
+      queryTimeoutMs: 500,
+      fetchImpl: async () => {
+        // Respond after 50ms
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return Response.json({
+          data: {
+            identity_hash: "schema-hash",
+            schema_name: "lastsecrets/LastSecret",
+          },
+        });
+      },
+    });
+
+    const start = Date.now();
+    const result = await client.declareAppSchema("lastsecrets", lastSecretSchema.schema);
+    const elapsed = Date.now() - start;
+
+    expect(result.canonical).toBe("schema-hash");
+    // Should succeed and complete in time
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("propagates timeout error through mapSdkError with correct code", async () => {
+    const client = newLastDbClient({
+      userHash: "user",
+      socketPath: "/tmp/folddb.sock",
+      queryTimeoutMs: 50,
+      fetchImpl: async () => {
+        // Simulate a hanging request that never resolves
+        return new Promise(() => {});
+      },
+    });
+
+    try {
+      await client.declareAppSchema("lastsecrets", lastSecretSchema.schema);
+      throw new Error("Expected timeout error to be thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LastSecretsError);
+      if (err instanceof LastSecretsError) {
+        expect(err.code).toBe("query_timeout");
+        expect(err.message).toContain("did not complete within");
+      }
+    }
+  });
+});
 
 describe("LastDB client schema declaration", () => {
   it("declares and loads LastSecrets through the direct schema route", async () => {
