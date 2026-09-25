@@ -517,19 +517,19 @@ export function redactKnownSecretWords(value: string): string {
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new LastSecretsError(
-              "query_timeout",
-              `LastDB query did not complete within ${timeoutMs}ms`,
-            ),
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(
+      () =>
+        reject(
+          new LastSecretsError(
+            "query_timeout",
+            `LastDB query did not complete within ${timeoutMs}ms`,
           ),
-        timeoutMs,
-      ),
-    ),
-  ]);
+        ),
+      timeoutMs,
+    );
+    promise
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timeoutId));
+  });
 }
