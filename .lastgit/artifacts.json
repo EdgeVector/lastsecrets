@@ -2,7 +2,8 @@
   "artifacts": [
     {
       "app": "lastsecrets",
-      "paths": ["bin", "dist"]
+      "paths": ["bin", "dist"],
+      "platform": "darwin-arm64"
     }
   ]
 }

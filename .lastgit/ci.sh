@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LastGit merge gate for lastsecrets (private).
+# Merge gate for lastsecrets. Run by .github/workflows/ci-required.yml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob 2>/dev/null || true

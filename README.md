@@ -20,7 +20,7 @@ lastsecrets init
 ```
 
 Public download surface: `https://github.com/EdgeVector/lastsecrets`. EdgeVector
-contributor review remains LastGit (`http://localhost:3300/EdgeVector/lastsecrets.git`).
+contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
