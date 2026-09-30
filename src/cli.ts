@@ -41,7 +41,14 @@ const defaultIo: Io = {
   stdinText: () => Bun.stdin.text(),
 };
 
-export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Promise<number> {
+type Deps = { newClient: typeof newLastDbClient };
+const defaultDeps: Deps = { newClient: newLastDbClient };
+
+export async function run(
+  argv = process.argv.slice(2),
+  io: Io = defaultIo,
+  cliDeps: Deps = defaultDeps,
+): Promise<number> {
   const [command, arg, ...rest] = argv;
   try {
     if (command === "schema-json") {
@@ -56,9 +63,9 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
       const socketPath = resolveSocketPath(opts.socketPath);
-      const preflight = newLastDbClient({ nodeUrl, socketPath });
+      const preflight = cliDeps.newClient({ nodeUrl, socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = newLastDbClient({ nodeUrl, socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPath, userHash });
       // Mini owns resolve/registration and must return Schema Service catalog
       // identities; private visibility is not a local-only schema mode.
       const { canonical, schemaName } = await client.declareAppSchema(
@@ -96,9 +103,9 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
       const socketPath = resolveSocketPath(opts.socketPath);
-      const preflight = newLastDbClient({ nodeUrl, socketPath });
+      const preflight = cliDeps.newClient({ nodeUrl, socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = newLastDbClient({ nodeUrl, socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPath, userHash });
 
       const registered = await client.registerForDistribution(OWNER_APP_ID, [
         lastSecretSchema.schema,
@@ -167,24 +174,27 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
     if (command === "put" && arg) {
       const opts = parseOptions(rest);
       if (!opts.valueStdin) throw new Error("put requires --value-stdin");
-      const { client, config } = await prepareStorage(opts.config);
       const value = await io.stdinText();
-      const meta = await putSecret(client, config, {
+      const input = {
         slug: arg,
         label: requireOpt(opts, "label"),
         provider: requireOpt(opts, "provider"),
         purpose: requireOpt(opts, "purpose"),
         environment: requireOpt(opts, "env"),
         value,
-      });
+      };
+      const meta = await withStorage(cliDeps, opts.config, (client, config) =>
+        putSecret(client, config, input),
+      );
       io.stdout.write(`${formatMetadata(meta)}\n`);
       return 0;
     }
 
     if (command === "get" && arg) {
       const opts = parseOptions(rest);
-      const { client, config } = await prepareStorage(opts.config);
-      const secret = await getSecret(client, config, arg);
+      const secret = await withStorage(cliDeps, opts.config, (client, config) =>
+        getSecret(client, config, arg),
+      );
       io.stdout.write(secret.secretValue);
       if (!secret.secretValue.endsWith("\n")) io.stdout.write("\n");
       return 0;
@@ -192,8 +202,10 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
 
     if (command === "list") {
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
-      const { client, config } = await prepareStorage(opts.config);
-      for (const secret of await listSecrets(client, config)) {
+      const secrets = await withStorage(cliDeps, opts.config, (client, config) =>
+        listSecrets(client, config),
+      );
+      for (const secret of secrets) {
         io.stdout.write(`${formatMetadata(secret)}\n`);
       }
       return 0;
@@ -201,8 +213,10 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
 
     if (command === "search" && arg) {
       const opts = parseOptions(rest);
-      const { client, config } = await prepareStorage(opts.config);
-      for (const secret of await searchSecrets(client, config, arg)) {
+      const found = await withStorage(cliDeps, opts.config, (client, config) =>
+        searchSecrets(client, config, arg),
+      );
+      for (const secret of found) {
         io.stdout.write(`${formatMetadata(secret)}\n`);
       }
       return 0;
@@ -210,8 +224,10 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
 
     if (command === "admin-slice") {
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
-      const { client, config } = await prepareStorage(opts.config);
-      const slice = buildAdminSecretsSlice(await listSecrets(client, config));
+      const listed = await withStorage(cliDeps, opts.config, (client, config) =>
+        listSecrets(client, config),
+      );
+      const slice = buildAdminSecretsSlice(listed);
       io.stdout.write(`${JSON.stringify(slice, null, 2)}\n`);
       return 0;
     }
@@ -223,12 +239,12 @@ export async function run(argv = process.argv.slice(2), io: Io = defaultIo): Pro
         throw new Error("migrate requires --fields FIELD[,FIELD...] to scan");
       }
       const rawConfig = loadStorageConfig(opts.config);
-      const secrets = newLastDbClient({
+      const secrets = cliDeps.newClient({
         nodeUrl: rawConfig.nodeUrl,
         socketPath: rawConfig.nodeSocketPath,
         userHash: rawConfig.userHash,
       });
-      const config = await declareStorageSchemas(secrets, rawConfig);
+      const config = await ensureStorageSchemas(secrets, rawConfig);
       const brain = newBrainClient({
         nodeUrl: config.nodeUrl,
         socketPath: config.nodeSocketPath,
@@ -323,17 +339,59 @@ export async function initCliSentry(
   }
 }
 
-async function prepareStorage(configPath?: string): Promise<{
-  client: ReturnType<typeof newLastDbClient>;
-  config: Config;
-}> {
+/** True when the pinned config already names both storage schemas. */
+function hasPinnedSchemaNames(config: Config): boolean {
+  return Boolean(config.schemaName && config.indexSchemaName);
+}
+
+/**
+ * Only `lastsecrets init` declares schemas. Every other command trusts the
+ * names pinned in config: a declare on each run costs two POSTs to
+ * /api/schemas/declare (audit append, alias persistence, catalog insert) and
+ * made `peer:lastsecrets` the top schema-op caller on the node. A legacy config
+ * without both names declares once, in memory.
+ */
+async function ensureStorageSchemas(
+  client: ReturnType<typeof newLastDbClient>,
+  config: Config,
+): Promise<Config> {
+  return hasPinnedSchemaNames(config) ? config : declareStorageSchemas(client, config);
+}
+
+/** True when a node error says the pinned schema is not known to the node. */
+export function isUnknownSchemaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = err instanceof Error ? (err as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && !/^node_http_(400|404|422)$/.test(code)) return false;
+  return (
+    /schema/i.test(message) &&
+    /(unknown|not found|not loaded|not registered|no such|does not exist)/i.test(message)
+  );
+}
+
+/**
+ * Run a storage operation against the pinned schemas without declaring first.
+ * If the first real call fails with an unknown-schema error, declare once and
+ * retry once.
+ */
+async function withStorage<T>(
+  deps: Deps,
+  configPath: string | undefined,
+  fn: (client: ReturnType<typeof newLastDbClient>, config: Config) => Promise<T>,
+): Promise<T> {
   const config = loadStorageConfig(configPath);
-  const client = newLastDbClient({
+  const client = deps.newClient({
     nodeUrl: config.nodeUrl,
     socketPath: config.nodeSocketPath,
     userHash: config.userHash,
   });
-  return { client, config: await declareStorageSchemas(client, config) };
+  const initial = await ensureStorageSchemas(client, config);
+  try {
+    return await fn(client, initial);
+  } catch (err) {
+    if (!hasPinnedSchemaNames(config) || !isUnknownSchemaError(err)) throw err;
+    return fn(client, await declareStorageSchemas(client, config));
+  }
 }
 
 async function declareStorageSchemas(
