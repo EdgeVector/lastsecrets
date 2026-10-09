@@ -147,6 +147,7 @@ LastDB owns local durability and access to the socket. LastSecrets relies on the
 ## Development
 
 ```sh
-bun test
 bun run typecheck
 ```
+
+The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck and the artifact build in `.lastgit/ci.sh`.

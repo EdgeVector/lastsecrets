@@ -3,7 +3,7 @@
 #        sop-github-artifact-app-migration.
 #
 # `ci-required` is the branch-protection check. It runs .lastgit/ci.sh
-# (shell syntax, typecheck, artifact build, bun test) unchanged. `publish` runs
+# (shell syntax, typecheck, artifact build) unchanged. `publish` runs
 # on a push to main only, after the gate is green, and uploads the host-track
 # artifact `ht-artifact-<sha>`. `host-track refresh lastsecrets` on the Mac pulls
 # it (last-stack-github-artifact-pull), re-checks every digest, and promotes
@@ -25,8 +25,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test
+  gate:
+    name: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -40,12 +40,12 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [test]
+    needs: [gate]
     runs-on: ubuntu-24.04
     steps:
       - name: Every needed job succeeded
         env:
-          RESULT: ${{ needs.test.result }}
+          RESULT: ${{ needs.gate.result }}
         run: test "$RESULT" = success
 
   publish:

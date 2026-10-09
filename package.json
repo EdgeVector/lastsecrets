@@ -9,7 +9,6 @@
     "lastsecrets": "src/cli.ts"
   },
   "scripts": {
-    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "bash scripts/build-artifact.sh"
   },

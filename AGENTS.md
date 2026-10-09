@@ -10,3 +10,4 @@ Use LastSecrets for all secret writes and reads in this repo.
   that mention credentials.
 - If LastSecrets is unavailable, stop before handling raw secret material and ask
   Tom how to proceed.
+- The tests are deleted (Tom, 2026-10-09). The gate runs shell syntax checks, typecheck and the artifact build.
