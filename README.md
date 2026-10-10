@@ -68,7 +68,11 @@ lastsecrets delete temporary-dev-invite temporary-dev-api-key
 ```
 
 The command accepts 1–63 distinct slugs and an optional `--config PATH`.
-It uses the current owner access and verifies the configured LastSecrets schema identities.
+It uses the current owner access and the same configured schema route as get and put.
+It selects the configured name first, or the saved hash when the name is absent.
+It requires one exact installed name, the correct owner, complete field names, a hash key, and state Available.
+It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
+A retired name claim remains valid for this exact installed route. The command never switches to another schema name.
 It reads fixed metadata fields only. It never reads or prints a secret value.
 It sends one native Delete batch for every named key, even when its metadata projection is empty.
 These deletes have no version condition.

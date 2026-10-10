@@ -155,22 +155,26 @@ export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
 }
 function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,
   configuredHash?: string, configuredName?: string): string {
-  const matches = schemas.filter((value) => {
-    const schema = object(value);
-    return schema.owner_app_id === OWNER_APP_ID && schema.descriptive_name === definition.descriptive_name;
-  });
+  const route = configuredName && configuredName.length > 0 ? configuredName : configuredHash;
+  if (!configuredHash || !/^[a-f0-9]{64}$/.test(configuredHash) || !route) {
+    throw new DeleteError("configured_schema_identity_mismatch");
+  }
+  // Pin the same literal route as get/put. Retirement only controls descriptive-name resolution.
+  const matches = schemas.filter((value) => object(value).name === route);
   if (matches.length !== 1) throw new DeleteError("schema_owner_identity_ambiguous");
   const schema = object(matches[0]);
-  if (typeof schema.name !== "string" || typeof schema.identity_hash !== "string" || !schema.name ||
-      !configuredHash || schema.identity_hash !== configuredHash || !Array.isArray(schema.fields) ||
-      schema.fields.length !== definition.fields.length || new Set(schema.fields).size !== schema.fields.length ||
+  const key = object(schema.key);
+  if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
+      schema.state !== "Available" || typeof schema.name_claim_retired !== "boolean" ||
+      typeof schema.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(schema.identity_hash) ||
+      schema.schema_type !== definition.schema_type || key.hash_field !== definition.key.hash_field ||
+      (key.range_field !== undefined && key.range_field !== null) ||
+      !Array.isArray(schema.fields) || schema.fields.length !== definition.fields.length ||
+      new Set(schema.fields).size !== schema.fields.length ||
       !schema.fields.every((field) => typeof field === "string" && definition.fields.includes(field))) {
     throw new DeleteError("configured_schema_identity_mismatch");
   }
-  if (configuredName && ![schema.name, schema.identity_hash, `${OWNER_APP_ID}/${definition.descriptive_name}`].includes(configuredName)) {
-    throw new DeleteError("configured_schema_name_mismatch");
-  }
-  return schema.name;
+  return route;
 }
 export function deleteReads(schemas: { secret: string; index: string }, slugs: string[]): ExactRead[] {
   return [
