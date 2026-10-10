@@ -15,6 +15,7 @@ echo "== dependencies =="
 bun install --frozen-lockfile
 
 echo "== typecheck / build =="
+bun run typecheck
 for f in src/*.ts; do
   [ -e "$f" ] || continue
   echo "bun build $f"
