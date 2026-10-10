@@ -2,6 +2,11 @@ import { readConfig, type Config } from "./config.ts";
 import { type LastDbClient, type QueryRow, redactKnownSecretWords } from "./lastdb.ts";
 import { ALL_SECRETS_INDEX_KEY, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
 
+import {
+  DeleteError, absentSlugs, deleteProgress, deleteReads, deleteReceipt,
+  resolveDeleteSchemas, rollupAbsentSlugs, rollupRepair, strictRollup, validateDeleteSlugs,
+} from "./batch.ts";
+
 export type SecretInput = {
   slug: string;
   label: string;
@@ -51,6 +56,48 @@ type StorageConfig = Pick<
   Config,
   "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName"
 >;
+
+/** Intentional exact-key deletion. Metadata repair is a separate, conditional write. */
+export async function deleteSecrets(client: LastDbClient, config: StorageConfig, slugs: string[]) {
+  validateDeleteSlugs(slugs);
+  const progress = deleteProgress(slugs);
+  try {
+    const schemas = resolveDeleteSchemas(await client.nativeBatch.schemas(), config);
+    const reads = deleteReads(schemas, slugs);
+    const before = await client.nativeBatch.readKeys(reads);
+    absentSlugs(before, slugs);
+    strictRollup(before[slugs.length]!);
+    // An uncertain request stops this sequence. Never retry a mutation here.
+    progress.delete_outcome = "unknown";
+    await client.nativeBatch.mutate(slugs.map((slug) => ({
+      type: "mutation", schema: schemas.secret, mutation_type: "delete",
+      fields_and_values: {}, key_value: { hash: slug, range: null },
+    })));
+    progress.delete_outcome = "acknowledged";
+    // Fresh reads retain metadata for an observed recreated slug and current unrelated entries.
+    const fresh = await client.nativeBatch.readKeys(reads);
+    const absent = absentSlugs(fresh, slugs);
+    progress.metadata_absent_refs = absent.map(secretRef);
+    const repair = rollupRepair(schemas.index, strictRollup(fresh[slugs.length]!), absent);
+    if (repair) {
+      progress.metadata_cleanup = "unknown";
+      await client.nativeBatch.mutate([repair]);
+      progress.metadata_cleanup = "acknowledged";
+    } else {
+      // Never delete or create the whole rollup to repair an absent entry.
+      progress.metadata_cleanup = "not_needed";
+    }
+    const after = await client.nativeBatch.readKeys(reads);
+    progress.metadata_absent_refs = absentSlugs(after, slugs).map(secretRef);
+    progress.rollup_absent_refs = rollupAbsentSlugs(strictRollup(after[slugs.length]!), slugs).map(secretRef);
+    progress.post_read = "completed";
+    const complete = progress.metadata_absent_refs.length === slugs.length && progress.rollup_absent_refs.length === slugs.length;
+    return deleteReceipt(progress, complete ? "complete" : "post_read_incomplete");
+  } catch (err) {
+    // Do not render response bodies, values, SDK causes, or JSON parser excerpts.
+    return deleteReceipt(progress, err instanceof DeleteError ? err.code : "delete_incomplete");
+  }
+}
 
 export async function putSecret(
   client: LastDbClient,

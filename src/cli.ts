@@ -12,6 +12,7 @@ import {
 import { captureSentryException, initSentry } from "./observability/sentry.ts";
 import {
   buildAdminSecretsSlice,
+  deleteSecrets,
   formatMetadata,
   getSecret,
   listSecrets,
@@ -50,6 +51,7 @@ export async function run(
   cliDeps: Deps = defaultDeps,
 ): Promise<number> {
   const [command, arg, ...rest] = argv;
+  let deleteCommandStarted = false;
   try {
     if (command === "schema-json") {
       io.stdout.write(`${JSON.stringify(lastSecretSchema, null, 2)}\n`);
@@ -171,6 +173,19 @@ export async function run(
       return 0;
     }
 
+    if (command === "delete") {
+      const { slugs, configPath } = parseDeleteArgs([arg, ...rest].filter((v): v is string => v !== undefined));
+      const config = loadStorageConfig(configPath);
+      const client = cliDeps.newClient({
+        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash,
+      });
+      // This path never declares schemas, grants access, rewrites config, or retries.
+      deleteCommandStarted = true;
+      const receipt = await deleteSecrets(client, config, slugs);
+      io.stdout.write(`${JSON.stringify(receipt)}\n`);
+      return receipt.ok ? 0 : 1;
+    }
+
     if (command === "put" && arg) {
       const opts = parseOptions(rest);
       if (!opts.valueStdin) throw new Error("put requires --value-stdin");
@@ -284,6 +299,17 @@ export async function run(
     io.stderr.write(`${usage()}\n`);
     return 2;
   } catch (err) {
+    if (command === "delete") {
+      // Config and argument errors can contain caller bytes; do not send them to telemetry.
+      io.stdout.write(`${JSON.stringify({
+        schema: "lastsecrets.delete.v1", ok: false,
+        code: deleteCommandStarted ? "delete_outcome_unconfirmed" : "delete_refused_before_request",
+        delete_outcome: deleteCommandStarted ? "unknown" : "not_sent",
+        metadata_cleanup: deleteCommandStarted ? "unknown" : "not_attempted", post_read: "not_completed",
+        full_record_absence_verified: false, secret_value_tip_absence_verified: false,
+      })}\n`);
+      return 1;
+    }
     await captureSentryException(err, {
       entrypoint: "cli",
       command: command ?? "none",
@@ -461,6 +487,24 @@ function parseOptions(args: string[]): Options {
   return opts;
 }
 
+function parseDeleteArgs(args: string[]): { slugs: string[]; configPath?: string } {
+  const slugs: string[] = [];
+  let configPath: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--config") {
+      const value = args[++i];
+      if (configPath !== undefined || !value || value.startsWith("--")) throw new Error("invalid delete config option");
+      configPath = value;
+    } else if (arg.startsWith("--")) {
+      throw new Error("unsupported delete option");
+    } else {
+      slugs.push(arg);
+    }
+  }
+  return { slugs, configPath };
+}
+
 function requireOpt(opts: Options, key: "label" | "provider" | "purpose" | "env"): string {
   const value = opts[key];
   if (!value) throw new Error(`missing --${key}`);
@@ -474,6 +518,7 @@ function usage(): string {
     "       lastsecrets schema-json",
     "       lastsecrets put <slug> --label TEXT --provider TEXT --purpose TEXT --env TEXT --value-stdin",
     "       lastsecrets get <slug>",
+    "       lastsecrets delete <slug> [<slug> ...] [--config PATH]",
     "       lastsecrets ref <slug>",
     "       lastsecrets list",
     "       lastsecrets search <term>",
@@ -484,6 +529,7 @@ function usage(): string {
     "init     — resolve/register schemas through Mini and pin catalog identities.",
     "publish  — add distribution governance and verify Schema Service identities.",
     "admin-slice — emit metadata-only JSON for the admin delivery path.",
+    "delete   — delete exact local slugs and repair metadata; emit a value-free JSON receipt.",
   ].join("\n");
 }
 

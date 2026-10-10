@@ -16,6 +16,7 @@ import {
 } from "@lastdb/app-sdk";
 
 import { OWNER_APP_ID, type SchemaDefinition } from "./schema.ts";
+import { newNativeBatchClient, type NativeBatchClient } from "./batch.ts";
 
 export type QueryRow = {
   fields: Record<string, unknown>;
@@ -49,6 +50,7 @@ export type VerifyDistributionReadyResult = {
 };
 
 export type LastDbClient = {
+  nativeBatch: NativeBatchClient;
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(
     appId: string,
@@ -244,6 +246,7 @@ export function newLastDbClient(opts: {
   };
 
   return {
+    nativeBatch: newNativeBatchClient(sdkTransport),
     async autoIdentity() {
       const body = await callJson("/api/system/auto-identity", "GET");
       const userHash = objectString(body, "user_hash");

@@ -61,6 +61,36 @@ lastsecrets ref schema-r2-dev
 
 `lastsecrets list` and `lastsecrets search <term>` return metadata only and always print `value=<redacted>`.
 
+Delete one or more exact local slugs after their task ends:
+
+```sh
+lastsecrets delete temporary-dev-invite temporary-dev-api-key
+```
+
+The command accepts 1–63 distinct slugs and an optional `--config PATH`.
+It uses the current owner access and verifies the configured LastSecrets schema identities.
+It reads fixed metadata fields only. It never reads or prints a secret value.
+It sends one native Delete batch for every named key, even when its metadata projection is empty.
+These deletes have no version condition.
+
+The command then reads the named keys and the metadata rollup again.
+It removes rollup entries only for acknowledged slugs whose metadata remains absent.
+It compares the exact previous rollup payload before the metadata write.
+It keeps the content and order of every unrelated entry.
+It sends no rollup write when the rollup or the relevant entries are absent.
+A final batch read observes the named keys and their metadata entries.
+
+CAUTION: The Delete batch and the metadata repair are separate requests.
+A failure can leave a deleted secret with an old metadata entry.
+A concurrent write can recreate a named key or change the rollup.
+The command refuses ambiguous metadata and stops after a conflict or an uncertain write.
+It does not retry automatically. Read the value-free JSON receipt before a separate cleanup attempt.
+Exit 0 means the Delete batch received an ack and the final metadata reads show absence.
+The result is an observed metadata state. It does not prove full-record or secret-value tip absence.
+The receipt states both absence limits as false.
+It does not prove the removal of historical bytes or backups.
+It does not revoke a provider credential or delete a remote account.
+
 ## Agent and Automation Policy
 
 Agents must use LastSecrets for writing or retrieving secrets. Raw values are
