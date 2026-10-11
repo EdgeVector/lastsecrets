@@ -11,6 +11,11 @@ export const DELETE_METADATA_FIELDS = lastSecretSchema.schema.fields.filter(
 export const DELETE_SLUG_LIMIT = 63; // One rollup read plus these keys fits the native 64-query limit.
 type ObjectRecord = Record<string, unknown>;
 export type ExactRead = { schema: string; key: string; fields: string[] };
+type ConflictState = "clean" | "conflict" | "unknown";
+type SelectedConflict = {
+  state: ConflictState;
+  fields: { molecule_uuid: string | null; state: ConflictState }[];
+};
 export type BatchMutation = {
   type: "mutation";
   schema: string;
@@ -82,15 +87,22 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
     async schemas() { return send("GET", "/api/schemas"); },
     async readKeys(reads) {
       if (reads.length < 1 || reads.length > 64) throw new DeleteError("invalid_read_count");
-      const reply = await send("POST", "/api/queries/batch", {
-        queries: reads.map((read) => ({
-          schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
-        })),
-      });
+      // Independent bounded reads share the normal owner transport. An absent
+      // endpoint never proves clean; known query flags retain their old path.
+      const [reply, selected] = await Promise.all([
+        send("POST", "/api/queries/batch", {
+          queries: reads.map((read) => ({
+            schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
+          })),
+        }),
+        send("POST", "/api/conflicts/keys", {
+          keys: reads.map((read) => ({ schema_name: read.schema, fields: read.fields, hash: read.key })),
+        }).then((reply) => parseSelectedConflicts(reply, reads)).catch(() => null),
+      ]);
       if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
         throw new DeleteError("read_batch_reply_ambiguous");
       }
-      return reply.results.map((item, position) => parseExactRead(item, reads[position]!));
+      return reply.results.map((item, position) => parseExactRead(item, reads[position]!, selected?.[position]));
     },
     async mutate(mutations) {
       const reply = await send("POST", "/api/mutations/batch", { mutations });
@@ -114,7 +126,7 @@ function object(value: unknown): ObjectRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new DeleteError("reply_shape_ambiguous");
   return value as ObjectRecord;
 }
-function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
+function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConflict): QueryRow | null {
   const envelope = object(item);
   if (envelope.status !== 200) throw new DeleteError("key_read_unconfirmed");
   const reply = object(envelope.response);
@@ -132,15 +144,63 @@ function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
   if (key.hash !== read.key || key.range !== null || Object.keys(fields).some((field) => !read.fields.includes(field))) {
     throw new DeleteError("key_read_scope_mismatch");
   }
-  if (reply.conflict_flags !== "known") throw new DeleteError("key_conflict_state_unknown");
+  const unknown = reply.conflict_flags === "unknown";
+  if (reply.conflict_flags !== "known" && !unknown) throw new DeleteError("key_conflict_state_unknown");
+  if (unknown && (!selected || selected.state !== "clean" || selected.fields.some((field) => field.state !== "clean"))) {
+    throw new DeleteError("key_conflict_state_unknown");
+  }
   const metadata = object(row.metadata);
-  for (const field of read.fields) {
+  for (const [position, field] of read.fields.entries()) {
     const meta = metadata[field];
-    if (meta === undefined) continue;
-    const flag = object(meta).has_conflicts;
-    if (flag !== undefined && flag !== false) throw new DeleteError("key_conflict_state_ambiguous");
+    if (meta === undefined) {
+      if (unknown && Object.hasOwn(fields, field)) throw new DeleteError("key_conflict_metadata_missing");
+      continue;
+    }
+    const info = object(meta);
+    const flag = info.has_conflicts;
+    if (flag !== undefined && flag !== false && !(unknown && flag === "unknown")) {
+      throw new DeleteError("key_conflict_state_ambiguous");
+    }
+    if (unknown && (!validMoleculeIdentity(info.molecule_uuid) ||
+        info.molecule_uuid !== selected!.fields[position]!.molecule_uuid)) {
+      throw new DeleteError("key_conflict_molecule_mismatch");
+    }
   }
   return { fields, key: { hash: read.key, range: null } };
+}
+
+function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): SelectedConflict[] {
+  if (reply.version !== 1 || reply.scope !== "selected_field_molecules" || reply.count !== reads.length ||
+      !Array.isArray(reply.results) || reply.results.length !== reads.length) {
+    throw new DeleteError("selected_conflict_reply_ambiguous");
+  }
+  return reply.results.map((value, position) => {
+    const result = object(value);
+    if (!validConflictState(result.state) || !Array.isArray(result.fields) ||
+        result.fields.length !== reads[position]!.fields.length) throw new DeleteError("selected_conflict_reply_ambiguous");
+    const fields = result.fields.map((value) => {
+      const field = object(value);
+      if (!validConflictState(field.state) ||
+          !(validMoleculeIdentity(field.molecule_uuid) || (field.molecule_uuid === null && field.state === "unknown"))) {
+        throw new DeleteError("selected_conflict_reply_ambiguous");
+      }
+      return { molecule_uuid: field.molecule_uuid as string | null, state: field.state };
+    });
+    const combined = fields.some((field) => field.state === "unknown") ? "unknown" :
+      fields.some((field) => field.state === "conflict") ? "conflict" : "clean";
+    if (result.state !== combined) throw new DeleteError("selected_conflict_reply_ambiguous");
+    return { state: result.state, fields };
+  });
+}
+function validConflictState(value: unknown): value is ConflictState {
+  return value === "clean" || value === "conflict" || value === "unknown";
+}
+function validMoleculeIdentity(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (/^[a-fA-F0-9]{64}$/.test(value)) return true;
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.length === 32 && bytes.toString("base64url") === value;
 }
 
 export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
