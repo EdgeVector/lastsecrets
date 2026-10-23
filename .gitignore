@@ -2,3 +2,17 @@ node_modules/
 dist/
 .DS_Store
 *.log
+
+# Generated operational output stays outside Git (Tom, 2026-10-23).
+/.evidence/
+/.benchmark-output/
+/benchmark-results/
+/bench-results/
+/.portal-worktree
+**/__pycache__/
+*.pyc
+*.log
+*.log.gz
+*.stdout
+*.stderr
+# End generated operational output.
