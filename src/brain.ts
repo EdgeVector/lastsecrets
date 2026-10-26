@@ -59,10 +59,11 @@ export function newBrainClient(opts: {
   nodeUrl?: string;
   userHash: string;
   socketPath?: string;
+  socketPathOverride?: string;
   transport?: SdkTransport;
 }): BrainClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
-  const socketPath = resolveSocketPath(opts.socketPath);
+  const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
   const defaultHeaders = { "X-User-Hash": opts.userHash, "X-LastDB-Client": "lastsecrets" };
   const sdkTransport: SdkTransport = opts.transport ?? (isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)

@@ -136,7 +136,7 @@ export function normalizeNodeUrl(url: string | undefined | null): string {
   return raw;
 }
 
-export function resolveSocketPath(override?: string): string {
+export function resolveSocketPath(override?: string, configValue?: string): string {
   if (override && override.length > 0) return override;
   for (const name of [
     "LASTSECRETS_SOCKET_PATH",
@@ -147,6 +147,7 @@ export function resolveSocketPath(override?: string): string {
     const value = process.env[name];
     if (value && value.length > 0) return value;
   }
+  if (configValue && configValue.length > 0) return configValue;
   const lastdbHome = process.env.LASTDB_HOME ?? join(homedir(), ".lastdb");
   const folddbHome = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
   const lastdbSocket = join(lastdbHome, "data", SOCKET_FILE_NAME);
@@ -159,11 +160,12 @@ export function newLastDbClient(opts: {
   nodeUrl?: string;
   userHash?: string;
   socketPath?: string;
+  socketPathOverride?: string;
   fetchImpl?: FetchLike;
   queryTimeoutMs?: number;
 } = {}): LastDbClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
-  const socketPath = resolveSocketPath(opts.socketPath);
+  const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
   const queryTimeoutMs = opts.queryTimeoutMs ?? 30_000; // 30s default timeout
   const defaultHeaders: Record<string, string> = {
