@@ -65,9 +65,9 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
       const socketPath = resolveSocketPath(opts.socketPath);
-      const preflight = cliDeps.newClient({ nodeUrl, socketPath });
+      const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
       // Mini owns resolve/registration and must return Schema Service catalog
       // identities; private visibility is not a local-only schema mode.
       const { canonical, schemaName } = await client.declareAppSchema(
@@ -105,9 +105,9 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
       const socketPath = resolveSocketPath(opts.socketPath);
-      const preflight = cliDeps.newClient({ nodeUrl, socketPath });
+      const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
 
       const registered = await client.registerForDistribution(OWNER_APP_ID, [
         lastSecretSchema.schema,
