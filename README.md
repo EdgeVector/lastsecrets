@@ -209,6 +209,8 @@ The map does not copy records or add another molecule.
 A config without this map retains its existing data path.
 
 CAUTION: New canonical names produce new schema identities.
-Schema publication refuses a home with legacy secret fields.
-An explicit migration must preserve the old values before that home changes its definitions.
+A config without a field map keeps legacy declarations and the unknown-schema retry.
+`init` and `publish` also keep that path when they find legacy local schemas.
+Only a fresh home or a config with a field map uses the new vocabulary.
+An explicit migration must preserve the old values before a legacy home changes its definitions.
 `init` and `publish` do not perform that migration.

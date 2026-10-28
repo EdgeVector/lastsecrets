@@ -52,6 +52,7 @@ export type VerifyDistributionReadyResult = {
 };
 
 export type LastDbClient = {
+  readonly schemaFieldAliases?: FieldAliasProfiles;
   nativeBatch: NativeBatchClient;
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(
@@ -166,6 +167,7 @@ export function newLastDbClient(opts: {
   fetchImpl?: FetchLike;
   queryTimeoutMs?: number;
   schemaFieldAliases?: FieldAliasProfiles;
+  canonicalVocabulary?: boolean | "auto";
 } = {}): LastDbClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
@@ -251,21 +253,30 @@ export function newLastDbClient(opts: {
     return parsed;
   };
 
-  let canonicalReadiness: Promise<void> | undefined;
-  const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
-    const catalog = unwrapData(await callJson("/api/schemas", "GET"));
-    if (!Array.isArray(catalog.schemas)) throw new LastSecretsError("schema_catalog_invalid", "Cannot confirm the local schema format before declaration.");
-    for (const value of catalog.schemas) {
-      if (!value || typeof value !== "object") continue;
-      const schema = value as Record<string, unknown>;
-      if (schema.owner_app_id === OWNER_APP_ID && Array.isArray(schema.fields) &&
-          schema.fields.some((name) => name === "slug" || name === "payload_json" || name === "secret_value")) {
-        throw new LastSecretsError("canonical_migration_required", "This home uses legacy secret fields. An explicit data migration is required before new schema publication.");
-      }
-    }
-  })();
+  // Runtime clients without a map keep their original declaration path.
+  // Setup may select the new vocabulary only after it checks the home.
+  let canonicalMode: boolean | undefined = opts.canonicalVocabulary === "auto"
+    ? undefined : opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
+  let vocabularyReadiness: Promise<boolean> | undefined;
+  const useCanonicalVocabulary = (): Promise<boolean> => {
+    if (canonicalMode === false) return Promise.resolve(false);
+    return vocabularyReadiness ??= (async () => {
+      const catalog = unwrapData(await callJson("/api/schemas", "GET"));
+      if (!Array.isArray(catalog.schemas)) throw new LastSecretsError("schema_catalog_invalid", "Cannot confirm the local schema format before declaration.");
+      const legacy = catalog.schemas.some((value) => {
+        if (!value || typeof value !== "object") return false;
+        const schema = value as Record<string, unknown>;
+        return schema.owner_app_id === OWNER_APP_ID && Array.isArray(schema.fields) &&
+          schema.fields.some((name) => name === "slug" || name === "payload_json" || name === "secret_value");
+      });
+      canonicalMode ??= !legacy;
+      if (canonicalMode && legacy) throw new LastSecretsError("canonical_migration_required", "This home uses legacy secret fields. An explicit data migration is required before new schema publication.");
+      return canonicalMode;
+    })();
+  };
 
   return {
+    get schemaFieldAliases() { return canonicalMode === true ? {...fieldProfiles} : undefined; },
     nativeBatch: newNativeBatchClient(sdkTransport),
     async autoIdentity() {
       const body = await callJson("/api/system/auto-identity", "GET");
@@ -279,9 +290,9 @@ export function newLastDbClient(opts: {
       return { userHash };
     },
     async declareAppSchema(appId, schema) {
-      await requireCanonicalHome();
+      const canonicalMode = await useCanonicalVocabulary();
       const local = schema;
-      schema = canonicalSchema(schema);
+      if (canonicalMode) schema = canonicalSchema(schema);
       let body: unknown;
       try {
         body = await callJson("/api/schemas/declare", "POST", {
@@ -305,12 +316,13 @@ export function newLastDbClient(opts: {
           `LastDB did not return a canonical hash for ${OWNER_APP_ID}/LastSecret.`,
         );
       }
-      Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
+      if (canonicalMode) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
       return { canonical, schemaName };
     },
     async registerForDistribution(appId, schemas) {
-      await requireCanonicalHome();
-      schemas = schemas.map(canonicalSchema);
+      const canonicalMode = await useCanonicalVocabulary();
+      const localSchemas = schemas;
+      if (canonicalMode) schemas = schemas.map(canonicalSchema);
       const body = await callJson("/api/apps/register-for-distribution", "POST", {
         app_id: appId,
         schemas,
@@ -329,6 +341,10 @@ export function newLastDbClient(opts: {
           "distribution_register_bad_response",
           "LastDB register-for-distribution returned no items.",
         );
+      }
+      if (canonicalMode) for (const local of localSchemas) {
+        const item = items.find((item) => item.schema_name === `${appId}/${local.name}` || item.schema_name === local.name);
+        if (item?.identity_hash && item.status !== "error") Object.assign(fieldProfiles, profilesFor(local, [item.identity_hash, item.schema_name]));
       }
       return {
         app_id: typeof data.app_id === "string" ? data.app_id : appId,

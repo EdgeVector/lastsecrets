@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { canonicalSchema } from "./canonical-vocabulary.ts";
 import vocabulary from "./canonical-fields.json" with { type: "json" };
 import pkg from "../package.json" with { type: "json" };
 import { OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
@@ -71,9 +71,15 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
       const socketPath = resolveSocketPath(opts.socketPath);
+      const configPath = opts.config ?? defaultConfigPath();
+      let existing: Config | null = null;
+      try { existing = readConfig(configPath); } catch { /* no usable config */ }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
+        schemaFieldAliases:existing?.schemaFieldAliases,
+        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
+      });
       // Mini owns resolve/registration and must return Schema Service catalog
       // identities; private visibility is not a local-only schema mode.
       const { canonical, schemaName } = await client.declareAppSchema(
@@ -82,7 +88,6 @@ export async function run(
       );
       const { canonical: indexCanonical, schemaName: indexSchemaName } =
         await client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema);
-      const configPath = opts.config ?? defaultConfigPath();
       writeConfig(
         {
           configVersion: 1,
@@ -93,10 +98,7 @@ export async function run(
           indexSchemaHash: indexCanonical,
           indexSchemaName,
           nodeSocketPath: socketPath,
-          schemaFieldAliases: {
-            ...profilesFor(lastSecretSchema.schema, [canonical, schemaName]),
-            ...profilesFor(lastSecretIndexSchema.schema, [indexCanonical, indexSchemaName]),
-          },
+          schemaFieldAliases:client.schemaFieldAliases,
         },
         configPath,
       );
@@ -115,9 +117,15 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
       const socketPath = resolveSocketPath(opts.socketPath);
+      const configPath = opts.config ?? defaultConfigPath();
+      let existing: Config | null = null;
+      try { existing = readConfig(configPath); } catch { /* no usable config */ }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
+        schemaFieldAliases:existing?.schemaFieldAliases,
+        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
+      });
 
       const registered = await client.registerForDistribution(OWNER_APP_ID, [
         lastSecretSchema.schema,
@@ -153,13 +161,6 @@ export async function run(
       const primary = registered.items.find((i) => i.schema_name.endsWith("/LastSecret"));
       const indexItem = registered.items.find((i) => i.schema_name.endsWith("/LastSecretIndex"));
       if (primary?.identity_hash) {
-        const configPath = opts.config ?? defaultConfigPath();
-        let existing: Config | null = null;
-        try {
-          existing = readConfig(configPath);
-        } catch {
-          existing = null;
-        }
         writeConfig(
           {
             configVersion: 1,
@@ -171,10 +172,7 @@ export async function run(
             indexSchemaName:
               indexItem?.schema_name || existing?.indexSchemaName || "lastsecrets/LastSecretIndex",
             nodeSocketPath: existing?.nodeSocketPath ?? socketPath,
-            schemaFieldAliases: {
-              ...profilesFor(lastSecretSchema.schema, [primary.identity_hash, primary.schema_name || "lastsecrets/LastSecret"]),
-              ...(indexItem?.identity_hash ? profilesFor(lastSecretIndexSchema.schema, [indexItem.identity_hash, indexItem.schema_name || "lastsecrets/LastSecretIndex"]) : existing?.schemaFieldAliases),
-            },
+            schemaFieldAliases:client.schemaFieldAliases,
           },
           configPath,
         );
@@ -447,11 +445,7 @@ async function declareStorageSchemas(
     schemaName: declared.schemaName,
     indexSchemaHash: declaredIndex.canonical,
     indexSchemaName: declaredIndex.schemaName,
-    schemaFieldAliases: {
-      ...config.schemaFieldAliases,
-      ...profilesFor(lastSecretSchema.schema, [declared.canonical, declared.schemaName]),
-      ...profilesFor(lastSecretIndexSchema.schema, [declaredIndex.canonical, declaredIndex.schemaName]),
-    },
+    schemaFieldAliases:client.schemaFieldAliases,
   };
 }
 
