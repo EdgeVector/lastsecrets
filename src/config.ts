@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import { normalizeNodeUrl } from "./lastdb.ts";
 
 export const CONFIG_VERSION = 1;
@@ -14,6 +15,7 @@ export type Config = {
   indexSchemaHash?: string;
   indexSchemaName?: string;
   nodeSocketPath?: string;
+  schemaFieldAliases?: FieldAliasProfiles;
 };
 
 export class ConfigError extends Error {
@@ -92,5 +94,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   if (typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0) {
     config.nodeSocketPath = r.nodeSocketPath;
   }
+  const aliases = parseFieldAliases(r.schemaFieldAliases);
+  if (aliases) config.schemaFieldAliases = aliases;
   return config;
 }

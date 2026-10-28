@@ -194,3 +194,25 @@ bun run typecheck
 ```
 
 The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck and the artifact build in `.lastgit/ci.sh`.
+
+## Canonical field vocabulary
+
+New schema declarations use the reviewed definitions in `src/canonical-fields.json`.
+A fresh home submits these definitions through normal schema declarations.
+The schema service checks names, definitions, types, and concept reuse for every caller.
+No special vocabulary key or operator approval path exists.
+`lastsecrets vocabulary-json` exports the definitions. `lastsecrets schema-json` exports the canonical secret schema.
+Neither command reads secret values.
+
+The command interface keeps local names such as `slug` and `label`.
+An explicit field map translates these names at the transport boundary.
+The config stores this map for each registered schema identity. Reads and writes use the pinned canonical identity.
+The map does not copy records or add another molecule.
+A config without this map retains its existing data path.
+
+CAUTION: New canonical names produce new schema identities.
+A config without a field map keeps legacy declarations and the unknown-schema retry.
+`init` and `publish` also keep that path when they find legacy local schemas.
+Only a fresh home or a config with a field map uses the new vocabulary.
+An explicit migration must preserve the old values before a legacy home changes its definitions.
+`init` and `publish` do not perform that migration.

@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { canonicalSchema } from "./canonical-vocabulary.ts";
+import vocabulary from "./canonical-fields.json" with { type: "json" };
 import pkg from "../package.json" with { type: "json" };
 import { OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
 import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
@@ -54,7 +56,11 @@ export async function run(
   let deleteCommandStarted = false;
   try {
     if (command === "schema-json") {
-      io.stdout.write(`${JSON.stringify(lastSecretSchema, null, 2)}\n`);
+      io.stdout.write(`${JSON.stringify({...lastSecretSchema, schema:canonicalSchema(lastSecretSchema.schema)}, null, 2)}\n`);
+      return 0;
+    }
+    if (command === "vocabulary-json") {
+      io.stdout.write(`${JSON.stringify(vocabulary.fields, null, 2)}\n`);
       return 0;
     }
     if (command === "ref" && arg) {
@@ -65,9 +71,15 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
       const socketPath = resolveSocketPath(opts.socketPath);
+      const configPath = opts.config ?? defaultConfigPath();
+      let existing: Config | null = null;
+      try { existing = readConfig(configPath); } catch { /* no usable config */ }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
+        schemaFieldAliases:existing?.schemaFieldAliases,
+        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
+      });
       // Mini owns resolve/registration and must return Schema Service catalog
       // identities; private visibility is not a local-only schema mode.
       const { canonical, schemaName } = await client.declareAppSchema(
@@ -76,7 +88,6 @@ export async function run(
       );
       const { canonical: indexCanonical, schemaName: indexSchemaName } =
         await client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema);
-      const configPath = opts.config ?? defaultConfigPath();
       writeConfig(
         {
           configVersion: 1,
@@ -87,6 +98,7 @@ export async function run(
           indexSchemaHash: indexCanonical,
           indexSchemaName,
           nodeSocketPath: socketPath,
+          schemaFieldAliases:client.schemaFieldAliases,
         },
         configPath,
       );
@@ -105,9 +117,15 @@ export async function run(
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
       const socketPath = resolveSocketPath(opts.socketPath);
+      const configPath = opts.config ?? defaultConfigPath();
+      let existing: Config | null = null;
+      try { existing = readConfig(configPath); } catch { /* no usable config */ }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash });
+      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
+        schemaFieldAliases:existing?.schemaFieldAliases,
+        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
+      });
 
       const registered = await client.registerForDistribution(OWNER_APP_ID, [
         lastSecretSchema.schema,
@@ -143,13 +161,6 @@ export async function run(
       const primary = registered.items.find((i) => i.schema_name.endsWith("/LastSecret"));
       const indexItem = registered.items.find((i) => i.schema_name.endsWith("/LastSecretIndex"));
       if (primary?.identity_hash) {
-        const configPath = opts.config ?? defaultConfigPath();
-        let existing: Config | null = null;
-        try {
-          existing = readConfig(configPath);
-        } catch {
-          existing = null;
-        }
         writeConfig(
           {
             configVersion: 1,
@@ -161,6 +172,7 @@ export async function run(
             indexSchemaName:
               indexItem?.schema_name || existing?.indexSchemaName || "lastsecrets/LastSecretIndex",
             nodeSocketPath: existing?.nodeSocketPath ?? socketPath,
+            schemaFieldAliases:client.schemaFieldAliases,
           },
           configPath,
         );
@@ -177,7 +189,7 @@ export async function run(
       const { slugs, configPath } = parseDeleteArgs([arg, ...rest].filter((v): v is string => v !== undefined));
       const config = loadStorageConfig(configPath);
       const client = cliDeps.newClient({
-        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash,
+        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash, schemaFieldAliases:config.schemaFieldAliases,
       });
       // This path never declares schemas, grants access, rewrites config, or retries.
       deleteCommandStarted = true;
@@ -257,7 +269,7 @@ export async function run(
       const secrets = cliDeps.newClient({
         nodeUrl: rawConfig.nodeUrl,
         socketPath: rawConfig.nodeSocketPath,
-        userHash: rawConfig.userHash,
+        userHash: rawConfig.userHash, schemaFieldAliases:rawConfig.schemaFieldAliases,
       });
       const config = await ensureStorageSchemas(secrets, rawConfig);
       const brain = newBrainClient({
@@ -410,6 +422,7 @@ async function withStorage<T>(
     nodeUrl: config.nodeUrl,
     socketPath: config.nodeSocketPath,
     userHash: config.userHash,
+    schemaFieldAliases:config.schemaFieldAliases,
   });
   const initial = await ensureStorageSchemas(client, config);
   try {
@@ -432,6 +445,7 @@ async function declareStorageSchemas(
     schemaName: declared.schemaName,
     indexSchemaHash: declaredIndex.canonical,
     indexSchemaName: declaredIndex.schemaName,
+    schemaFieldAliases:client.schemaFieldAliases,
   };
 }
 
@@ -516,6 +530,7 @@ function usage(): string {
     "usage: lastsecrets init [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets publish [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets schema-json",
+    "       lastsecrets vocabulary-json",
     "       lastsecrets put <slug> --label TEXT --provider TEXT --purpose TEXT --env TEXT --value-stdin",
     "       lastsecrets get <slug>",
     "       lastsecrets delete <slug> [<slug> ...] [--config PATH]",
