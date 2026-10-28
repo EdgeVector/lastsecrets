@@ -53,12 +53,14 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   if (!value) return input;
   const aliases = profile(value, profiles) ?? fallback;
   const result = {...value};
-  const fields = object(value.fields);
-  if (fields && aliases) {
+  if (aliases) {
     const inverse = Object.fromEntries(Object.entries(aliases).map(([local, canonical]) => [canonical, local]));
-    result.fields = renameObject(fields, inverse, false);
+    for (const key of ["fields", "metadata"]) {
+      const fields = object(value[key]);
+      if (fields) result[key] = renameObject(fields, inverse, false);
+    }
   }
-  for (const key of ["results", "result", "rows", "records", "data", "hits"]) {
+  for (const key of ["results", "result", "response", "rows", "records", "data", "hits"]) {
     if (value[key] !== undefined) result[key] = decodeItem(value[key], profiles, aliases);
   }
   return result;
