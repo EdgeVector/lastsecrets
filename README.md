@@ -198,7 +198,9 @@ The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax ch
 ## Canonical field vocabulary
 
 New schema declarations use the reviewed definitions in `src/canonical-fields.json`.
-An operator must approve these definitions in Schema Service before a fresh home can declare the schemas.
+A fresh home submits these definitions through normal schema declarations.
+The schema service checks names, definitions, types, and concept reuse for every caller.
+No special vocabulary key or operator approval path exists.
 `lastsecrets vocabulary-json` exports the definitions. `lastsecrets schema-json` exports the canonical secret schema.
 Neither command reads secret values.
 
