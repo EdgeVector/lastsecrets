@@ -1,0 +1,19 @@
+{
+  "fields": {
+    "secret_locator_slug": { "description": "the stable slug in a lastsecrets:// secret locator", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_display_name": { "description": "the non-secret display name of a secret", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_provider_name": { "description": "the service or system to which a secret belongs", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_usage_description": { "description": "the non-secret description of the intended use of a secret", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_environment_name": { "description": "the named environment in which a secret is used", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_text_envelope": { "description": "a secret text value inside its value envelope; excluded from automatic search", "field_type": { "Object": { "value": "String" } }, "version": 1, "classification": { "sensitivity_level": 3, "data_domain": "secret" } },
+    "secret_created_at": { "description": "the RFC 3339 instant when a secret record was created", "field_type": "DateTime", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_updated_at": { "description": "the RFC 3339 instant when a secret record was last updated", "field_type": "DateTime", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_metadata_bucket_key": { "description": "the exact key of a secret metadata list; __all__ names the complete local list", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_metadata_list_json": { "description": "a JSON-encoded array of secret metadata records with no secret text values", "field_type": "String", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } },
+    "secret_metadata_updated_at": { "description": "the RFC 3339 instant when a secret metadata list was last updated", "field_type": "DateTime", "version": 1, "classification": { "sensitivity_level": 0, "data_domain": "metadata" } }
+  },
+  "schemas": {
+    "LastSecret": { "slug": "secret_locator_slug", "label": "secret_display_name", "provider": "secret_provider_name", "purpose": "secret_usage_description", "environment": "secret_environment_name", "secret_value": "secret_text_envelope", "created_at": "secret_created_at", "updated_at": "secret_updated_at" },
+    "LastSecretIndex": { "key": "secret_metadata_bucket_key", "payload_json": "secret_metadata_list_json", "updated_at": "secret_metadata_updated_at" }
+  }
+}

@@ -16,6 +16,8 @@ import {
 } from "@lastdb/app-sdk";
 
 import { OWNER_APP_ID, type SchemaDefinition } from "./schema.ts";
+import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import { newNativeBatchClient, type NativeBatchClient } from "./batch.ts";
 
 export type QueryRow = {
@@ -163,6 +165,7 @@ export function newLastDbClient(opts: {
   socketPathOverride?: string;
   fetchImpl?: FetchLike;
   queryTimeoutMs?: number;
+  schemaFieldAliases?: FieldAliasProfiles;
 } = {}): LastDbClient {
   const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
@@ -172,9 +175,10 @@ export function newLastDbClient(opts: {
     "X-LastDB-Client": "lastsecrets",
     ...(opts.userHash ? { "X-User-Hash": opts.userHash } : {}),
   };
-  const sdkTransport: SdkTransport = isLoopbackNodeUrl(nodeUrl)
+  const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
+  const sdkTransport: SdkTransport = fieldAliasTransport(isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
-    : httpTransport(nodeUrl, defaultHeaders);
+    : httpTransport(nodeUrl, defaultHeaders), fieldProfiles);
   const sdkStoreKey = capabilityStoreKey(OWNER_APP_ID, sdkTransport.target);
   let sdkClient: SdkLastDbClient | null = null;
   const dataClient = (): SdkLastDbClient => {
@@ -247,6 +251,20 @@ export function newLastDbClient(opts: {
     return parsed;
   };
 
+  let canonicalReadiness: Promise<void> | undefined;
+  const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
+    const catalog = unwrapData(await callJson("/api/schemas", "GET"));
+    if (!Array.isArray(catalog.schemas)) throw new LastSecretsError("schema_catalog_invalid", "Cannot confirm the local schema format before declaration.");
+    for (const value of catalog.schemas) {
+      if (!value || typeof value !== "object") continue;
+      const schema = value as Record<string, unknown>;
+      if (schema.owner_app_id === OWNER_APP_ID && Array.isArray(schema.fields) &&
+          schema.fields.some((name) => name === "slug" || name === "payload_json" || name === "secret_value")) {
+        throw new LastSecretsError("canonical_migration_required", "This home uses legacy secret fields. An explicit data migration is required before new schema publication.");
+      }
+    }
+  })();
+
   return {
     nativeBatch: newNativeBatchClient(sdkTransport),
     async autoIdentity() {
@@ -261,6 +279,9 @@ export function newLastDbClient(opts: {
       return { userHash };
     },
     async declareAppSchema(appId, schema) {
+      await requireCanonicalHome();
+      const local = schema;
+      schema = canonicalSchema(schema);
       let body: unknown;
       try {
         body = await callJson("/api/schemas/declare", "POST", {
@@ -284,9 +305,12 @@ export function newLastDbClient(opts: {
           `LastDB did not return a canonical hash for ${OWNER_APP_ID}/LastSecret.`,
         );
       }
+      Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
       return { canonical, schemaName };
     },
     async registerForDistribution(appId, schemas) {
+      await requireCanonicalHome();
+      schemas = schemas.map(canonicalSchema);
       const body = await callJson("/api/apps/register-for-distribution", "POST", {
         app_id: appId,
         schemas,

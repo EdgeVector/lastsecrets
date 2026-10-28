@@ -1,3 +1,4 @@
+import { canonicalSchema } from "./canonical-vocabulary.ts";
 import type { Transport } from "@lastdb/app-sdk";
 import type { Config } from "./config.ts";
 import type { QueryRow } from "./lastdb.ts";
@@ -204,13 +205,15 @@ function validMoleculeIdentity(value: unknown): value is string {
 }
 
 export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
-  "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName"
+  "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases"
 >): { secret: string; index: string } {
   const catalog = object(body);
   if (catalog.ready !== true || !Array.isArray(catalog.schemas)) throw new DeleteError("schema_catalog_not_ready");
+  const secretCanonical = Boolean(config.schemaFieldAliases?.[config.schemaHash]);
+  const indexCanonical = Boolean(config.indexSchemaHash && config.schemaFieldAliases?.[config.indexSchemaHash]);
   return {
-    secret: resolveSchema(catalog.schemas, lastSecretSchema.schema, config.schemaHash, config.schemaName),
-    index: resolveSchema(catalog.schemas, lastSecretIndexSchema.schema, config.indexSchemaHash, config.indexSchemaName),
+    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, secretCanonical ? undefined : config.schemaName),
+    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, indexCanonical ? undefined : config.indexSchemaName),
   };
 }
 function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,

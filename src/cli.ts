@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import vocabulary from "./canonical-fields.json" with { type: "json" };
 import pkg from "../package.json" with { type: "json" };
 import { OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
 import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
@@ -54,7 +56,11 @@ export async function run(
   let deleteCommandStarted = false;
   try {
     if (command === "schema-json") {
-      io.stdout.write(`${JSON.stringify(lastSecretSchema, null, 2)}\n`);
+      io.stdout.write(`${JSON.stringify({...lastSecretSchema, schema:canonicalSchema(lastSecretSchema.schema)}, null, 2)}\n`);
+      return 0;
+    }
+    if (command === "vocabulary-json") {
+      io.stdout.write(`${JSON.stringify(vocabulary.fields, null, 2)}\n`);
       return 0;
     }
     if (command === "ref" && arg) {
@@ -87,6 +93,10 @@ export async function run(
           indexSchemaHash: indexCanonical,
           indexSchemaName,
           nodeSocketPath: socketPath,
+          schemaFieldAliases: {
+            ...profilesFor(lastSecretSchema.schema, [canonical, schemaName]),
+            ...profilesFor(lastSecretIndexSchema.schema, [indexCanonical, indexSchemaName]),
+          },
         },
         configPath,
       );
@@ -161,6 +171,10 @@ export async function run(
             indexSchemaName:
               indexItem?.schema_name || existing?.indexSchemaName || "lastsecrets/LastSecretIndex",
             nodeSocketPath: existing?.nodeSocketPath ?? socketPath,
+            schemaFieldAliases: {
+              ...profilesFor(lastSecretSchema.schema, [primary.identity_hash, primary.schema_name || "lastsecrets/LastSecret"]),
+              ...(indexItem?.identity_hash ? profilesFor(lastSecretIndexSchema.schema, [indexItem.identity_hash, indexItem.schema_name || "lastsecrets/LastSecretIndex"]) : existing?.schemaFieldAliases),
+            },
           },
           configPath,
         );
@@ -177,7 +191,7 @@ export async function run(
       const { slugs, configPath } = parseDeleteArgs([arg, ...rest].filter((v): v is string => v !== undefined));
       const config = loadStorageConfig(configPath);
       const client = cliDeps.newClient({
-        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash,
+        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash, schemaFieldAliases:config.schemaFieldAliases,
       });
       // This path never declares schemas, grants access, rewrites config, or retries.
       deleteCommandStarted = true;
@@ -257,7 +271,7 @@ export async function run(
       const secrets = cliDeps.newClient({
         nodeUrl: rawConfig.nodeUrl,
         socketPath: rawConfig.nodeSocketPath,
-        userHash: rawConfig.userHash,
+        userHash: rawConfig.userHash, schemaFieldAliases:rawConfig.schemaFieldAliases,
       });
       const config = await ensureStorageSchemas(secrets, rawConfig);
       const brain = newBrainClient({
@@ -410,6 +424,7 @@ async function withStorage<T>(
     nodeUrl: config.nodeUrl,
     socketPath: config.nodeSocketPath,
     userHash: config.userHash,
+    schemaFieldAliases:config.schemaFieldAliases,
   });
   const initial = await ensureStorageSchemas(client, config);
   try {
@@ -432,6 +447,11 @@ async function declareStorageSchemas(
     schemaName: declared.schemaName,
     indexSchemaHash: declaredIndex.canonical,
     indexSchemaName: declaredIndex.schemaName,
+    schemaFieldAliases: {
+      ...config.schemaFieldAliases,
+      ...profilesFor(lastSecretSchema.schema, [declared.canonical, declared.schemaName]),
+      ...profilesFor(lastSecretIndexSchema.schema, [declaredIndex.canonical, declaredIndex.schemaName]),
+    },
   };
 }
 
@@ -516,6 +536,7 @@ function usage(): string {
     "usage: lastsecrets init [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets publish [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets schema-json",
+    "       lastsecrets vocabulary-json",
     "       lastsecrets put <slug> --label TEXT --provider TEXT --purpose TEXT --env TEXT --value-stdin",
     "       lastsecrets get <slug>",
     "       lastsecrets delete <slug> [<slug> ...] [--config PATH]",

@@ -2,6 +2,7 @@ export const OWNER_APP_ID = "lastsecrets";
 
 export type FieldType =
   | "String"
+  | "DateTime"
   | { Array: "String" }
   | { Object: Record<string, FieldType> };
 
