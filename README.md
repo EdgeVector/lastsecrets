@@ -228,7 +228,8 @@ The command checks both saved definitions, the owner, fields, types, keys, and a
 It selects secret records through the secret-value field and metadata records through the metadata-list field.
 LastDB freezes the source keys, checks counters and value coverage, and preserves atom references and clocks.
 It refuses uncovered values, retained conflicts, or suspect counters.
-The client checks each durable phase receipt, saves the unchanged definition pins with the resulting runtime names, then resumes requests.
+The client checks each durable phase receipt and saves the unchanged definition pins with the resulting runtime names.
+The config write uses an atomic replacement and flushes the file and its directory before the command resumes requests.
 
 CAUTION: The command pauses requests across the node.
 Use `lastsecrets schema-values-convert --apply --maintenance` on the compatible release before the engine upgrade.

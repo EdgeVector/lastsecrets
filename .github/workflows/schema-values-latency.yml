@@ -1,0 +1,148 @@
+name: LastSecrets schema values and latency
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: lastsecrets-values-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+env:
+  APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
+  APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
+  DAEMON_BEFORE: 297ab1ff05d6e2886e642b8aaed8d461b9181e57
+  DAEMON_AFTER: 2a654e5f2b61469674b842618ac3057a405dfb0a
+  CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+jobs:
+  compare:
+    name: Actual CLI conversion and latency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.APP_AFTER }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.APP_BEFORE }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_BEFORE }}
+          path: daemon-before
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_AFTER }}
+          path: daemon-after
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - name: Require the actual source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$APP_AFTER"
+          test "$(git -C baseline rev-parse HEAD)" = "$APP_BEFORE"
+          test "$(git -C daemon-before rev-parse HEAD)" = "$DAEMON_BEFORE"
+          test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
+          mkdir "$RUNNER_TEMP/lastsecrets-definition-results"
+          printf 'App before: %s\nApp after: %s\nDaemon before: %s\nDaemon after: %s\n' \
+            "$APP_BEFORE" "$APP_AFTER" "$DAEMON_BEFORE" "$DAEMON_AFTER" \
+            > "$RUNNER_TEMP/lastsecrets-definition-results/revisions.txt"
+      - name: Require registered app definitions before the build
+        run: |
+          bun candidate/scripts/schema-definitions.mjs "$GITHUB_WORKSPACE/baseline" \
+            "$GITHUB_WORKSPACE/candidate" "$RUNNER_TEMP/lastsecrets-definition-results/definitions.json"
+      - name: Build the two actual daemons and CLI releases
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/lastsecrets-binaries"
+          for label in before after; do
+            if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
+            cd "$GITHUB_WORKSPACE/daemon-$label"
+            FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" \
+              CARGO_TARGET_DIR="$RUNNER_TEMP/lastsecrets-target-$label" \
+              cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
+            cp "$RUNNER_TEMP/lastsecrets-target-$label/dev-release/lastdbd" "$RUNNER_TEMP/lastsecrets-binaries/daemon-$label"
+            rm -rf "$RUNNER_TEMP/lastsecrets-target-$label"
+          done
+          for label in baseline candidate; do
+            cd "$GITHUB_WORKSPACE/$label"
+            bun install --frozen-lockfile
+            bun build src/cli.ts --compile --outfile "$RUNNER_TEMP/lastsecrets-binaries/$label"
+          done
+          cd "$RUNNER_TEMP/lastsecrets-binaries"
+          sha256sum daemon-before daemon-after baseline candidate > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Compare normal app operations across conversion and upgrade
+        id: operations
+        run: |
+          python3 candidate/scripts/schema-values-latency.py \
+            --baseline "$RUNNER_TEMP/lastsecrets-binaries/baseline" --baseline-revision "$APP_BEFORE" \
+            --candidate "$RUNNER_TEMP/lastsecrets-binaries/candidate" --candidate-revision "$APP_AFTER" \
+            --daemon-before "$RUNNER_TEMP/lastsecrets-binaries/daemon-before" --daemon-before-revision "$DAEMON_BEFORE" \
+            --daemon-after "$RUNNER_TEMP/lastsecrets-binaries/daemon-after" --daemon-after-revision "$DAEMON_AFTER" \
+            --lastdb-source "$GITHUB_WORKSPACE/daemon-after" --records 64 \
+            --output "$RUNNER_TEMP/lastsecrets-results"
+      - name: Check retained output for generated value bytes
+        if: ${{ always() && steps.operations.outcome != 'skipped' }}
+        id: redaction
+        run: |
+          python3 candidate/scripts/schema-values-latency.py --audit-only --records 64 \
+            --output "$RUNNER_TEMP/lastsecrets-results"
+      - name: Retain definition results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lastsecrets-definitions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lastsecrets-definition-results/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain raw measurement samples and source identities
+        if: ${{ always() && steps.redaction.outcome == 'success' }}
+        id: measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: lastsecrets-values-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lastsecrets-results/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify measurement archive identity, expiry, and checksum
+        if: ${{ always() && steps.measurements.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.measurements.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.measurements.outputs.artifact-url }}
+          ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-metadata.json"
+          python3 daemon-after/scripts/benchmarks/artifact.py \
+            --metadata "$RUNNER_TEMP/measurement-metadata.json" --output "$RUNNER_TEMP/measurement-receipt"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/measurement.zip"
+          printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/measurement.zip" | sha256sum --check
+          unzip -t "$RUNNER_TEMP/measurement.zip" > /dev/null
+  benchmark-complete:
+    if: ${{ always() }}
+    needs: [compare]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require operations, measurements, and verified output
+        env:
+          RESULT: ${{ needs.compare.result }}
+        run: test "$RESULT" = success
