@@ -162,6 +162,7 @@ def snapshot(node, config, expected, absent=()):
 
 
 def arm(args, Node, finish_setup, label, pair):
+    from app_multi_key_compare import require_cloud_off
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
     fresh = label == "fresh"
@@ -175,6 +176,7 @@ def arm(args, Node, finish_setup, label, pair):
     samples = {operation: [] for operation in OPERATIONS}
     try:
         node.start()
+        require_cloud_off(node, output, "before-setup")
         setup = args.candidate if fresh else args.baseline
         command(setup, node, config, "init", "--socket", str(node.socket))
         # Individual CLI calls define the latency workload. Verification batches all known keys.
@@ -191,11 +193,13 @@ def arm(args, Node, finish_setup, label, pair):
                     report.get("selected_keys") == report.get("expected_selected_keys") == args.records + 1,
                     "The actual app conversion is incomplete")
             save(output / "conversion.json", report)
+        require_cloud_off(node, output, "after-setup")
         finish_setup(node, output)
         node.stop()
         if label == "candidate":
             node.binary, node.revision = args.daemon_after, args.daemon_after_revision
         node.start()
+        require_cloud_off(node, output, "before-measure")
         # Read known values first; a repeated init must not hide an upgrade failure.
         after = snapshot(node, config, expected)
         require(before == after, "Conversion or reopen changed a current atom or author metadata")
@@ -239,8 +243,10 @@ def arm(args, Node, finish_setup, label, pair):
             del expected[key]
         listed(command(binary, node, config, "list")[0].stdout, set(expected))
         final = snapshot(node, config, expected, removed)
+        require_cloud_off(node, output, "after-measure")
         node.stop()
         node.start()
+        require_cloud_off(node, output, "after-reopen")
         require(snapshot(node, config, expected, removed) == final, "Reopen changed the final records")
         observations = [json.loads(line) for line in (output / "cli-observations.jsonl").read_text().splitlines()]
         require(len(observations) == args.records * len(OPERATIONS) and all(
