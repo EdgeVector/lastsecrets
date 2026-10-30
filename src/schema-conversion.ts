@@ -56,6 +56,12 @@ export async function convertSchemaValues(client: LastDbClient, supplied: Config
   }
   const allOwned = sources.every(({source}) => source.independent_fields === true);
   if (!pending && allOwned) {
+    const directory = data(await client.nativeBatch.schemas());
+    if (directory.ready !== true || !Array.isArray(directory.schemas)) fail("The schema directory is not ready.");
+    if (directory.schemas.map(object).some((schema) =>
+      (schema.owner_app_id === "lastsecrets" || String(schema.name).startsWith("lastsecrets/")) && schema.independent_fields !== true)) {
+      fail("An old app layout remains outside the configured owned sources. Owner review is required before upgrade.");
+    }
     if (saved) {
       if (report?.phase !== "complete" || saved.target_config_sha256 !== sourceSha) fail("The saved scope is incomplete.");
       checkScope(report, saved);

@@ -42,7 +42,9 @@ function definition(source: ObjectValue, local: SchemaDefinition) {
 function metadata(source: ObjectValue): Source["metadata"] {
   const properties = ["name", "identity_hash", "owner_app_id", "descriptive_name", "schema_type", "fields", "key",
     "field_types", "field_descriptions", "field_classifications", "field_data_classifications", "field_hashes", "field_versions"];
-  return {definition_sha256: sha(stable(Object.fromEntries(properties.map((key) => [key, source[key]])))),
+  const definition = Object.fromEntries(properties.map((key) => [key, source[key]]));
+  definition.fields = [...source.fields as string[]].sort();
+  return {definition_sha256: sha(stable(definition)),
     mappers_sha256: sha(stable(source.field_mappers ?? {}))};
 }
 export async function conversionSources(client: LastDbClient, cfg: Config, capabilities: ObjectValue): Promise<Source[]> {
