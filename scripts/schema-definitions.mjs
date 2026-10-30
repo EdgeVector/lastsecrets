@@ -1,10 +1,18 @@
 // Public replay confirms registered definitions. It supplies no publisher authority.
-import {writeFileSync} from "node:fs";
+// The registry is the one the comparison daemons use: `ENVIRONMENT` selects it from
+// the daemon source's folddb_profile/environments.json.
+import {readFileSync, writeFileSync} from "node:fs";
 import {join, resolve} from "node:path";
 
-const [baseline, candidate, output] = process.argv.slice(2);
-if (process.env.GITHUB_ACTIONS !== "true" || !baseline || !candidate || !output) {
-  throw Error("Run this definition check only in CI with both exact source paths and an output path");
+const [baseline, candidate, output, lastdbSource] = process.argv.slice(2);
+if (process.env.GITHUB_ACTIONS !== "true" || !baseline || !candidate || !output || !lastdbSource) {
+  throw Error("Run this definition check only in CI with both exact app sources, an output path, and the daemon source");
+}
+const environment = process.env.ENVIRONMENT;
+const registry = JSON.parse(readFileSync(join(resolve(lastdbSource), "folddb_profile/environments.json"), "utf8"));
+const service = registry.environments?.[environment]?.schema_service;
+if (typeof service !== "string" || !service.startsWith("https://")) {
+  throw Error("Set ENVIRONMENT to the Schema Service environment that the comparison daemons use");
 }
 const stable = (value) => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
   ? Object.fromEntries(Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => [k,stable(v)])) : value;
@@ -16,7 +24,7 @@ for (const [label, path] of [["baseline",baseline],["candidate",candidate]]) {
   const {canonicalSchema} = await import(join(root,"src/canonical-vocabulary.ts"));
   await Promise.all([definitions.lastSecretSchema,definitions.lastSecretIndexSchema].map(async(entry) => {
     const schema = canonicalSchema(entry.schema);
-    const response = await fetch("https://axo709qs11.execute-api.us-east-1.amazonaws.com/v1/schemas", {
+    const response = await fetch(`${service.replace(/\/+$/, "")}/v1/schemas`, {
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify({schema,mutation_mappers:{}}), signal:AbortSignal.timeout(60000),
     });
@@ -30,11 +38,11 @@ for (const [label, path] of [["baseline",baseline],["candidate",candidate]]) {
       same([...(stored.fields ?? [])].sort(),[...schema.fields].sort()) &&
       same(stored.field_descriptions,schema.field_descriptions) &&
       schema.fields.every((field) => same(stored.field_types?.[field],schema.field_types[field]));
-    results.push({label,schema:schema.descriptive_name,status:response.status,exact_definition:exact});
+    results.push({label,environment,schema:schema.descriptive_name,status:response.status,exact_definition:exact});
   }));
 }
-writeFileSync(output,JSON.stringify({definitions:results,complete:results.length === 4 && results.every((item) => item.exact_definition)},null,2)+"\n");
+writeFileSync(output,JSON.stringify({environment,definitions:results,complete:results.length === 4 && results.every((item) => item.exact_definition)},null,2)+"\n");
 for (const item of results) console.log(JSON.stringify(item));
 if (results.length !== 4 || results.some((item) => !item.exact_definition)) {
-  throw Error("Publish the exact LastSecrets definitions through their registered owner before the comparison");
+  throw Error(`Publish the exact LastSecrets definitions in the ${environment} Schema Service before the comparison`);
 }

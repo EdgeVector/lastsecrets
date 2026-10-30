@@ -14,9 +14,12 @@ concurrency:
 env:
   APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 34e6d312efadd10bade667895be7356cfddc48f8
-  DAEMON_AFTER: bac479311e3107f285988af512034e4dbd3fca40
+  DAEMON_BEFORE: 418639f0180ac7e379c5cce65737fa2a866da1f9
+  DAEMON_AFTER: 7867e8b5461af19036bdec3f6d91bd60e27c5f14
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  # CI uses the DEV Schema Service. The definition check and both daemons read
+  # this one value, so they always name the same registry.
+  ENVIRONMENT: dev
 jobs:
   compare:
     name: Actual CLI conversion and latency
@@ -63,7 +66,8 @@ jobs:
       - name: Require registered app definitions before the build
         run: |
           bun candidate/scripts/schema-definitions.mjs "$GITHUB_WORKSPACE/baseline" \
-            "$GITHUB_WORKSPACE/candidate" "$RUNNER_TEMP/lastsecrets-definition-results/definitions.json"
+            "$GITHUB_WORKSPACE/candidate" "$RUNNER_TEMP/lastsecrets-definition-results/definitions.json" \
+            "$GITHUB_WORKSPACE/daemon-after"
       - name: Build the two actual daemons and CLI releases
         env:
           CARGO_BUILD_JOBS: '3'

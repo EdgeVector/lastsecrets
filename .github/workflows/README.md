@@ -7,6 +7,8 @@ check on `main`. The `publish` job builds the host-track artifact on a push to
 
 `schema-values-latency.yml` runs the normal LastSecrets CLI on generated homes.
 It uses exact app and LastDB revisions, registered definitions, and the compatible release for explicit conversion.
+The job sets `ENVIRONMENT=dev`. The definition check and both daemons use the DEV Schema Service from the daemon source.
+CI does not depend on production publisher authority.
 Two balanced pairs compare the CLI requests before and after the daemon upgrade. A separate arm checks fresh setup.
 The seed has 64 records with 4096 bytes per value. Both arms create 64 more records during the timed requests.
 All known values, metadata membership, current atom identities, author metadata, repeat setup, deletion, and reopen remain required.
