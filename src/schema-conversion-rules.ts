@@ -49,14 +49,16 @@ function metadata(source: ObjectValue): Source["metadata"] {
 }
 export async function conversionSources(client: LastDbClient, cfg: Config, capabilities: ObjectValue): Promise<Source[]> {
   const entries = [
-    {pin:cfg.schemaHash, runtime:cfg.schemaName, definition:lastSecretSchema.schema, member:"secret_value"},
-    {pin:cfg.indexSchemaHash, runtime:cfg.indexSchemaName, definition:lastSecretIndexSchema.schema, member:"payload_json"},
+    {pin:cfg.schemaHash, definition:lastSecretSchema.schema, member:"secret_value"},
+    {pin:cfg.indexSchemaHash, definition:lastSecretIndexSchema.schema, member:"payload_json"},
   ];
   if (entries.some(({pin}) => !identity(pin)) || new Set(entries.map(({pin}) => pin)).size !== 2) {
     fail("Two distinct saved definition identities are required.");
   }
   const sources = await Promise.all(entries.map(async(entry): Promise<Source> => {
-    const source = await schemaMetadata(client, entry.runtime ?? entry.pin!);
+    // Older schemaName values address namespace aliases, not the kept data source.
+    // The saved definition identity resolves the actual runtime on both models.
+    const source = await schemaMetadata(client, entry.pin!);
     const {canonical} = definition(source, entry.definition);
     const profile = cfg.schemaFieldAliases?.[entry.pin!] ?? cfg.schemaFieldAliases?.[String(source.name)];
     if (source.identity_hash !== entry.pin || (canonical ? !same(profile, aliasesFor(entry.definition)) : profile !== undefined)) {

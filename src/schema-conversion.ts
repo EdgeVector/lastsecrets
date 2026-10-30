@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { configBytes, readConfig, writeConfig, type Config } from "./config.ts";
 import { LastSecretsError, type LastDbClient } from "./lastdb.ts";
+import { OWNER_APP_ID } from "./schema.ts";
 import { aliasRetirements, checkMetadata, checkRetirements, conversionSources, targetConfig } from "./schema-conversion-rules.ts";
 import { checkScope, data, fail, fence, object, readScope, receipt, removeScope, same, saveScope, sha, terminal,
   type ConversionScope, type ConversionReport } from "./conversion-scope.ts";
@@ -59,7 +60,7 @@ export async function convertSchemaValues(client: LastDbClient, supplied: Config
     const directory = data(await client.nativeBatch.schemas());
     if (directory.ready !== true || !Array.isArray(directory.schemas)) fail("The schema directory is not ready.");
     if (directory.schemas.map(object).some((schema) =>
-      (schema.owner_app_id === "lastsecrets" || String(schema.name).startsWith("lastsecrets/")) && schema.independent_fields !== true)) {
+      (schema.owner_app_id === OWNER_APP_ID || String(schema.name).startsWith(`${OWNER_APP_ID}/`)) && schema.independent_fields !== true)) {
       fail("An old app layout remains outside the configured owned sources. Owner review is required before upgrade.");
     }
     if (saved) {
