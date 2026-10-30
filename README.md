@@ -242,3 +242,16 @@ Start the compatible release before the app conversion. A primary change require
 Repeat the same command after an interruption. Use `--abort --apply --maintenance` only before publication.
 CI conversion and latency results remain required before release.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
+
+The CI latency comparison uses the actual CLI and two exact daemon revisions.
+Two AB/BA pairs start with 64 records and 4096 bytes per value.
+Every operation retains 64 calls per arm. A separate arm checks fresh setup.
+Complete values, metadata membership, current atoms, deletion, repeat setup, and reopen remain required.
+Latency includes the CLI process and all requests; it does not isolate database latency.
+
+Each timed call retains child CPU time and bounded daemon and host counter observations.
+The counter reads occur outside the timer and change the gaps between calls for both sources.
+Results with those observations form a separate experiment from earlier runs without them.
+The summary also shows create and update tails for each arm. No sample is removed or trimmed.
+Host pressure shows shared load; it does not prove the cause of a request delay.
+Missing counters stay unreported. Raw observations pass the output audit before artifact upload.

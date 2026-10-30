@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import resource
 import statistics
 import subprocess
 import sys
@@ -70,12 +71,26 @@ def cli_environment(node, config):
     return environment
 
 
-def command(binary, node, config, verb, *arguments, payload=None, allow_failure=False):
+def command(binary, node, config, verb, *arguments, payload=None, allow_failure=False, operation=None):
+    if operation is not None:
+        from process_counters import read_counters
+        before = read_counters(node.process.pid)
+        cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.perf_counter_ns()
     result = subprocess.run([str(binary), verb, *arguments, "--config", str(config)],
                             input=payload, text=True, capture_output=True,
                             env=cli_environment(node, config), timeout=120)
     elapsed = (time.perf_counter_ns() - started) / 1e6
+    if operation is not None:
+        cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+        after = read_counters(node.process.pid)
+        observation = {"operation": operation, "elapsed_ms": elapsed,
+            "waited_child_cpu_ms": 1000 * (cpu_after.ru_utime + cpu_after.ru_stime
+                - cpu_before.ru_utime - cpu_before.ru_stime),
+            "daemon_and_host": {"before": before, "after": after}}
+        # No arguments, output, or generated value bytes enter this file.
+        with (config.parent / "cli-observations.jsonl").open("a") as stream:
+            stream.write(json.dumps(observation, sort_keys=True) + "\n")
     # CLI output can contain a generated value. Never copy it into an error or log.
     if result.returncode and verb in ("init", "schema-values-convert"):
         # These control commands never fetch value bytes. The output audit
@@ -85,10 +100,10 @@ def command(binary, node, config, verb, *arguments, payload=None, allow_failure=
     return result, elapsed
 
 
-def put(binary, node, config, index, generation=0):
+def put(binary, node, config, index, generation=0, operation=None):
     return command(binary, node, config, "put", slug(index), "--label", slug(index),
                    "--provider", "ci-example", "--purpose", "generated CI record", "--env", "ci",
-                   "--value-stdin", payload=value(index, generation))[1]
+                   "--value-stdin", payload=value(index, generation), operation=operation)[1]
 
 
 def listed(text, expected):
@@ -196,19 +211,19 @@ def arm(args, Node, finish_setup, label, pair):
                     "The actual app does not own exactly two schemas")
             require(all(not schema.get("alternate_keys") for schema in owned), "Different record types became alternate keys")
         for index in range(args.records):
-            result, elapsed = command(binary, node, config, "get", slug(index))
+            result, elapsed = command(binary, node, config, "get", slug(index), operation="get")
             require(result.stdout.rstrip("\n") == expected[slug(index)], "The actual app returned a different value")
             samples["get"].append(elapsed)
         for index in range(args.records, args.records * 2):
-            samples["create"].append(put(binary, node, config, index))
+            samples["create"].append(put(binary, node, config, index, operation="create"))
             expected[slug(index)] = value(index)
         for index in range(args.records):
-            samples["update"].append(put(binary, node, config, index, generation=1))
+            samples["update"].append(put(binary, node, config, index, generation=1, operation="update"))
             expected[slug(index)] = value(index, 1)
         for _ in range(args.records):
             for operation, verb, arguments in (("list", "list", ()), ("search", "search", ("ci-example",)),
                                                ("admin_slice", "admin-slice", ())):
-                result, elapsed = command(binary, node, config, verb, *arguments)
+                result, elapsed = command(binary, node, config, verb, *arguments, operation=operation)
                 samples[operation].append(elapsed)
                 if operation == "admin_slice":
                     result = json.loads(result.stdout)
@@ -227,9 +242,15 @@ def arm(args, Node, finish_setup, label, pair):
         node.stop()
         node.start()
         require(snapshot(node, config, expected, removed) == final, "Reopen changed the final records")
-        result = {"label":label,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
+        observations = [json.loads(line) for line in (output / "cli-observations.jsonl").read_text().splitlines()]
+        require(len(observations) == args.records * len(OPERATIONS) and all(
+            [row["elapsed_ms"] for row in observations if row["operation"] == operation] == samples[operation]
+            for operation in OPERATIONS), "The CLI observations do not match every timed sample")
+        result = {"label":label,"pair":pair,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
                   "remaining":len(expected),"unchanged_seed_atoms":len(before),"repeat_setup":label != "baseline",
-                  "reopen":True,"batch_delete":True,"disk":node.disk_breakdown()}
+                  "reopen":True,"batch_delete":True,"disk":node.disk_breakdown(),
+                  "cli_observations": {"count":len(observations),"sha256":hashlib.sha256(
+                      (output / "cli-observations.jsonl").read_bytes()).hexdigest()}}
         save(output / "result.json", result)
         return result
     finally:
@@ -259,6 +280,17 @@ def render(args, summary):
                 cells[label].append(statistics.median(samples[math.ceil(len(samples) * percentile) - 1] for samples in values))
         old, new = cells["baseline"], cells["candidate"]
         lines.append(f"| {operation} | {old[0]:.3f} | {new[0]:.3f} | {old[1]:.3f} | {new[1]:.3f} | {(new[1]/old[1]-1)*100:+.1f}% |")
+    lines.extend(["", "Create and update tails remain separate for each arm:", "",
+        "| Arm | Operation | P95 ms | Maximum ms | Calls above 100 ms |", "|---|---|---:|---:|---:|"])
+    for arm in summary["arms"]:
+        for operation in ("create", "update"):
+            samples = sorted(arm["samples_ms"][operation])
+            lines.append(f"| {arm['label']} / pair {arm['pair']} | {operation} | "
+                f"{samples[math.ceil(len(samples)*.95)-1]:.3f} | {samples[-1]:.3f} | {sum(item>100 for item in samples)} |")
+    lines.extend(["", "Each timed CLI call retains child CPU time and bounded daemon/host counter observations.",
+        "Counter reads occur before the timer and after its end. They change gaps between calls equally for both sources.",
+        "This recipe is a separate experiment from earlier runs without counters. No earlier sample is removed or trimmed.",
+        "Host pressure is a shared observation, not proof of a request cause. Missing counters stay unreported."])
     return "\n".join(lines) + "\n"
 
 
@@ -287,6 +319,7 @@ def main():
     require(not args.output.exists() and args.output.parent.resolve().is_relative_to(runner), "A fresh runner output path is required")
     args.output.mkdir(mode=0o700)
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
+    sys.path.append(str(args.lastdb_source / "scripts/benchmarks/range_continuation"))
     from node import Node, file_hash
     from app_multi_key_compare import finish_setup
     summary = {"complete":False,"sources":{name:str(item) for name,item in vars(args).items()},"arms":[],
