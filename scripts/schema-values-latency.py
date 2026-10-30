@@ -205,7 +205,7 @@ def arm(args, Node, finish_setup, label, pair):
         for index in range(args.records):
             samples["update"].append(put(binary, node, config, index, generation=1))
             expected[slug(index)] = value(index, 1)
-        for _ in range(16):
+        for _ in range(args.records):
             for operation, verb, arguments in (("list", "list", ()), ("search", "search", ("ci-example",)),
                                                ("admin_slice", "admin-slice", ())):
                 result, elapsed = command(binary, node, config, verb, *arguments)
@@ -241,6 +241,7 @@ def render(args, summary):
              f"App: `{args.baseline_revision}` → `{args.candidate_revision}`.",
              f"Compatible daemon: `{args.daemon_before_revision}`. Removal daemon: `{args.daemon_after_revision}`.",
              f"Two balanced AB/BA pairs use {args.records} seed records and 4096 bytes per value, plus equal timed creates.",
+             f"Each operation retains {args.records} actual CLI samples per arm.",
              "The candidate converts on the compatible daemon, then reopens the same home on the removal daemon.",
              "A separate fresh-init arm uses the removal daemon. Current atom identities and author metadata remain equal across conversion and reopen.",
              "Times include the CLI process and all app requests. They do not isolate database latency.", "",
@@ -253,7 +254,7 @@ def render(args, summary):
             cells[label] = []
             for percentile in (.50,.95):
                 values = [sorted(item["samples_ms"][operation]) for item in arms]
-                require(all(len(samples) >= 16 and all(math.isfinite(item) and item > 0 for item in samples) for samples in values),
+                require(all(len(samples) == args.records and all(math.isfinite(item) and item > 0 for item in samples) for samples in values),
                         "A measurement is invalid or incomplete")
                 cells[label].append(statistics.median(samples[math.ceil(len(samples) * percentile) - 1] for samples in values))
         old, new = cells["baseline"], cells["candidate"]
