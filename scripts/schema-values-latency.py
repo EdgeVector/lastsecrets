@@ -171,29 +171,7 @@ def arm(args, Node, finish_setup, label, pair):
         if label == "candidate":
             plan = json.loads(command(binary, node, config, "schema-values-convert")[0].stdout)
             require(plan.get("phase") == "plan" and len(plan.get("schemas", [])) == 2, "The normal app did not return its conversion plan")
-            try:
-                converted = command(binary, node, config, "schema-values-convert", "--apply", "--maintenance")[0]
-            except RuntimeError:
-                # Diagnose only this generated home. Never retry an active job,
-                # and never turn the original CLI failure into a passing arm.
-                try:
-                    current = node.call("/api/db/alternate-keys", {"action":"app_status"})[0]
-                    save(output / "conversion-status.json", current)
-                except RuntimeError as status_error:
-                    (output / "conversion-status-rejection.txt").write_text(str(status_error))
-                    absent = "/api/db/alternate-keys: HTTP 404: b'app conversion is absent'"
-                    if str(status_error) == absent:
-                        try:
-                            node.call("/api/db/alternate-keys", {"action":"app_begin", "schemas":plan["schemas"],
-                                      "retire":plan["retire"], "maintenance":True})
-                        except RuntimeError as rejection:
-                            # Owner control metadata only. The generated-value
-                            # audit must pass before this file can be uploaded.
-                            (output / "conversion-rejection.txt").write_text(str(rejection))
-                        else:
-                            save(output / "conversion-reproduction.json", {"direct_begin_succeeded":True})
-                raise
-            report = json.loads(converted.stdout)
+            report = json.loads(command(binary, node, config, "schema-values-convert", "--apply", "--maintenance")[0].stdout)
             require(report.get("phase") == "complete" and report.get("durable") is True and
                     report.get("selected_keys") == report.get("expected_selected_keys") == args.records + 1,
                     "The actual app conversion is incomplete")

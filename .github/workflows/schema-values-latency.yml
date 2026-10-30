@@ -14,8 +14,8 @@ concurrency:
 env:
   APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 297ab1ff05d6e2886e642b8aaed8d461b9181e57
-  DAEMON_AFTER: 2a654e5f2b61469674b842618ac3057a405dfb0a
+  DAEMON_BEFORE: 98bc32bf3d59fd562150b882f462a7ec8ec42d38
+  DAEMON_AFTER: 533685c8f7dd876f096c173bafbb4dd35d596357
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
   compare:
