@@ -234,6 +234,11 @@ The config write uses an atomic replacement and flushes the file and its directo
 CAUTION: The command pauses requests across the node.
 Use `lastsecrets schema-values-convert --apply --maintenance` on the compatible release before the engine upgrade.
 The compatible release must return HTTP 404 for an absent conversion. Other status failures stop this command.
+
+Existing format 4 and 5 homes require format 6 before conversion.
+Use the supervised upgrade procedure. Stop the selected daemon, then run `lastdb db enable-alternate-keys` for that home.
+Start the compatible release before the app conversion. A primary change requires Tom's authorization.
+
 Repeat the same command after an interruption. Use `--abort --apply --maintenance` only before publication.
 CI conversion and latency results remain required before release.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.

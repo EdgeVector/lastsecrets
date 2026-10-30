@@ -77,6 +77,10 @@ def command(binary, node, config, verb, *arguments, payload=None, allow_failure=
                             env=cli_environment(node, config), timeout=120)
     elapsed = (time.perf_counter_ns() - started) / 1e6
     # CLI output can contain a generated value. Never copy it into an error or log.
+    if result.returncode and verb in ("init", "schema-values-convert"):
+        # These control commands never fetch value bytes. The output audit
+        # still checks this file before any artifact upload.
+        (config.parent / f"failed-{verb}.stderr").write_text(result.stderr)
     require(result.returncode == 0 or allow_failure, f"Actual CLI {verb} failed; no value is retained in this error")
     return result, elapsed
 

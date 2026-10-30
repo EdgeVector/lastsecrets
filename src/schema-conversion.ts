@@ -41,8 +41,7 @@ function receipt(value: unknown): Report {
 async function status(client: LastDbClient): Promise<Report | undefined> {
   try { return receipt(await client.request("/api/db/alternate-keys", "POST", {action:"app_status"})); }
   catch (error) {
-    if (error instanceof LastSecretsError && error.code === "node_http_404" &&
-        error.message.includes("app conversion is absent")) return undefined;
+    if (error instanceof LastSecretsError && error.code === "app_conversion_absent") return undefined;
     throw error;
   }
 }

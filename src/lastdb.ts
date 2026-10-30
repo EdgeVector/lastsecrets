@@ -248,6 +248,12 @@ export function newLastDbClient(opts: {
     const text = await response.text();
     const parsed = parseBody(text);
     if (!response.ok) {
+      // The owner error route uses plain text. Match only this exact control
+      // response; arbitrary response bodies must never enter a secret error.
+      if (response.status === 404 && method === "POST" && path === "/api/db/alternate-keys" &&
+          objectString(body, "action") === "app_status" && parsed === "app conversion is absent") {
+        throw new LastSecretsError("app_conversion_absent", "No app conversion exists.");
+      }
       throw new LastSecretsError(
         `node_http_${response.status}`,
         `LastDB ${method} ${path} returned HTTP ${response.status}${safeBodyMessage(parsed)}`,
