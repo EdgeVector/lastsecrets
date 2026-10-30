@@ -12,6 +12,8 @@ export type SchemaDefinition = {
   descriptive_name: string;
   purpose_statement: string;
   schema_type: "Hash";
+  /** Definitions can be reused without sharing this schema's record values. */
+  independent_fields?: boolean;
   key: { hash_field: string };
   fields: string[];
   field_types: Record<string, FieldType>;

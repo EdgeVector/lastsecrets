@@ -24,6 +24,13 @@ contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
+New homes require LastDB capability `owned_app_schemas_v1`.
+The app declares independent values for secret records and the metadata summary.
+Canonical field definitions stay reusable. They do not share record values.
+These are separate record types, so this change adds no alternate key.
+Existing shared values require explicit data conversion on a compatible release before setup or publication.
+An alternate key does not prove that the schema owns its values.
+
 The initial schema contract is defined in `src/schema.ts`.
 
 `secret_value` is deliberately a normal object field with secret/no-index classifications. Secrecy is a field policy, not a distinct primitive value type.
@@ -211,8 +218,21 @@ The map does not copy records or add another molecule.
 A config without this map retains its existing data path.
 
 CAUTION: New canonical names produce new schema identities.
-A config without a field map keeps legacy declarations and the unknown-schema retry.
-`init` and `publish` also keep that path when they find legacy local schemas.
-Only a fresh home or a config with a field map uses the new vocabulary.
-An explicit migration must preserve the old values before a legacy home changes its definitions.
-`init` and `publish` do not perform that migration.
+A config without a field map keeps its existing field names.
+All new declarations require schema-owned values, with or without a field map.
+`init` and `publish` refuse shared values before the first declaration.
+They also refuse a change to a saved definition identity.
+An explicit conversion must preserve old values on a compatible LastDB release before the engine upgrade.
+`lastsecrets schema-values-convert` shows the plan and reads no raw secret values.
+The command checks both saved definitions, the owner, fields, types, keys, and aliases.
+It selects secret records through the secret-value field and metadata records through the metadata-list field.
+LastDB freezes the source keys, checks counters and value coverage, and preserves atom references and clocks.
+It refuses uncovered values, retained conflicts, or suspect counters.
+The client checks each durable phase receipt, saves the unchanged definition pins with the resulting runtime names, then resumes requests.
+
+CAUTION: The command pauses requests across the node.
+Use `lastsecrets schema-values-convert --apply --maintenance` on the compatible release before the engine upgrade.
+The compatible release must return HTTP 404 for an absent conversion. Other status failures stop this command.
+Repeat the same command after an interruption. Use `--abort --apply --maintenance` only before publication.
+CI conversion and latency results remain required before release.
+Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
