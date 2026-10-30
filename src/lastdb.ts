@@ -114,6 +114,34 @@ type FetchInit = RequestInit & { unix?: string };
 type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 
 const QUERY_PAGE_SIZE = 1000;
+// The owner endpoint returns plain text. Only fixed conversion diagnostics can
+// enter a secret error; arbitrary server text and record values stay private.
+const CONVERSION_REJECTIONS = new Set([
+  "invalid app schema conversion request",
+  "alternate changes require the personal database",
+  ...[
+    "conversion requires explicit maintenance, 1 to 64 kept schemas, and at most 128 retired schemas",
+    "finish or abort the active app conversion first",
+    "app conversion requires a node without registered logical peers; coordinate the peer cutover separately",
+    "conversion maintenance supports at most 256 installed schemas",
+    "conversion repeats a kept schema",
+    "conversion source is absent",
+    "conversion source is not app-owned",
+    "conversion source identity or availability differs",
+    "conversion requires an ordinary legacy source; independent values and mapped authorities need a separate plan",
+    "conversion source exceeds 128 fields",
+    "conversion source has suspect counters or kept history records",
+    "conversion source uses a molecule generation; materialize it before conversion",
+    "retired schema is absent",
+    "retired schemas must belong to the converted apps and cannot be kept sources",
+    "conversion does not retire an existing independent schema",
+    "conversion is personal-only; a kept or retired schema still belongs to a database catalog",
+    "membership field is not declared",
+    "membership directory and count must use the same app's declared fields",
+    "membership count changed after the app prepared its conversion",
+    "legacy source values lack an authoritative app member; repair membership or abort this conversion",
+  ].map((message) => `Invalid data: ${message}`),
+]);
 const SOCKET_FILE_NAME = "folddb.sock";
 // Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback *marker*
 // (hostname only) so clients select socket transport via isLoopbackNodeUrl —
@@ -253,6 +281,10 @@ export function newLastDbClient(opts: {
       if (response.status === 404 && method === "POST" && path === "/api/db/alternate-keys" &&
           objectString(body, "action") === "app_status" && parsed === "app conversion is absent") {
         throw new LastSecretsError("app_conversion_absent", "No app conversion exists.");
+      }
+      if (response.status === 400 && method === "POST" && path === "/api/db/alternate-keys" &&
+          typeof parsed === "string" && CONVERSION_REJECTIONS.has(parsed)) {
+        throw new LastSecretsError("app_conversion_rejected", `LastDB refused the schema conversion: ${parsed}`);
       }
       throw new LastSecretsError(
         `node_http_${response.status}`,

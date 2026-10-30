@@ -158,7 +158,8 @@ export async function convertSchemaValues(client: LastDbClient, cfg: Config, con
     const finished = await step("app_finish");
     if (finished.phase !== "complete") fail("the final receipt is incomplete. Resume the same command.");
     return finished;
-  } catch {
-    fail(`conversion ${report!.change_id} remains in ${report!.phase}. Resume this command; use --abort only before publication.`);
+  } catch (error) {
+    const detail = error instanceof LastSecretsError && error.code === "app_conversion_rejected" ? ` ${error.message}` : "";
+    fail(`conversion ${report!.change_id} remains in ${report!.phase}. Resume this command; use --abort only before publication.${detail}`);
   }
 }
