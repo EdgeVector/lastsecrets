@@ -14,8 +14,8 @@ concurrency:
 env:
   APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 418639f0180ac7e379c5cce65737fa2a866da1f9
-  DAEMON_AFTER: 7867e8b5461af19036bdec3f6d91bd60e27c5f14
+  DAEMON_BEFORE: 084dfe803afaf956e225a593f77dc4388afd7f93
+  DAEMON_AFTER: 13c3cf27da2406455ce27940b9e329df39eae8b6
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # CI uses the DEV Schema Service. The definition check and both daemons read
   # this one value, so they always name the same registry.

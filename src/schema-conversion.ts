@@ -1,164 +1,120 @@
 /** Explicit owner maintenance. This command never fetches secret values. */
-import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
-import { readConfig, writeConfig, type Config } from "./config.ts";
+import { readFileSync } from "node:fs";
+import { configBytes, readConfig, writeConfig, type Config } from "./config.ts";
 import { LastSecretsError, type LastDbClient } from "./lastdb.ts";
-import { OWNER_APP_ID, lastSecretSchema, lastSecretIndexSchema } from "./schema.ts";
+import { aliasRetirements, checkMetadata, checkRetirements, conversionSources, targetConfig } from "./schema-conversion-rules.ts";
+import { checkScope, data, fail, fence, object, readScope, receipt, removeScope, same, saveScope, sha, terminal,
+  type ConversionScope, type ConversionReport } from "./conversion-scope.ts";
 
-type ObjectValue = Record<string, unknown>;
-type Report = {
-  change_id: string; phase: string; durable: true;
-  converted_schemas: string[]; retired_schemas: string[];
-  selected_keys: number; expected_selected_keys: number;
-  schemas: Array<{schema: string; expected_identity: string}>;
-};
-const object = (value: unknown): ObjectValue => value && typeof value === "object" && !Array.isArray(value)
-  ? value as ObjectValue : {};
-const data = (value: unknown): ObjectValue => object(object(value).data ?? value);
-function fail(message: string): never { throw new Error(`LastSecrets schema conversion: ${message}`); }
-function stable(value: unknown): string {
-  if (Array.isArray(value)) return "[" + value.map(stable).join(",") + "]";
-  if (value && typeof value === "object") return "{" + Object.entries(value)
-    .filter(([,item]) => item !== undefined).sort(([a],[b]) => a.localeCompare(b))
-    .map(([key,item]) => JSON.stringify(key) + ":" + stable(item)).join(",") + "}";
-  return JSON.stringify(value);
-}
-const same = (a: unknown, b: unknown) => stable(a) === stable(b);
-const terminal = (report: Report) => ["complete", "aborted"].includes(report.phase);
-function receipt(value: unknown): Report {
-  const report = object(data(value).app_schema_conversion);
-  const phases = ["backfill", "verifying", "verified", "retiring", "ready", "aborting", "complete", "aborted"];
-  if (report.durable !== true || typeof report.change_id !== "string" || !report.change_id ||
-      typeof report.phase !== "string" || !phases.includes(report.phase) ||
-      !Array.isArray(report.converted_schemas) || !Array.isArray(report.retired_schemas) ||
-      report.retired_schemas.some((name) => typeof name !== "string" || !name) ||
-      !Array.isArray(report.schemas) || !Number.isSafeInteger(report.selected_keys) ||
-      !Number.isSafeInteger(report.expected_selected_keys) || Number(report.selected_keys) < 0 ||
-      Number(report.selected_keys) > Number(report.expected_selected_keys)) {
-    fail("the node did not return a valid durable receipt. No next phase or config write follows this reply.");
-  }
-  return report as Report;
-}
-async function status(client: LastDbClient): Promise<Report | undefined> {
-  try { return receipt(await client.request("/api/db/alternate-keys", "POST", {action:"app_status"})); }
+const ROUTE = "/api/db/alternate-keys";
+async function status(client: LastDbClient): Promise<ConversionReport | undefined> {
+  try { return receipt(await client.request(ROUTE, "POST", {action:"app_status"})); }
   catch (error) {
     if (error instanceof LastSecretsError && error.code === "app_conversion_absent") return undefined;
     throw error;
   }
 }
 
-export async function convertSchemaValues(client: LastDbClient, cfg: Config, configPath: string,
+export async function convertSchemaValues(client: LastDbClient, supplied: Config, path: string,
   options: {apply?: boolean; maintenance?: boolean; abort?: boolean}) {
-  const version = data(await client.request("/api/version", "GET"));
-  if (object(version.capabilities).app_schema_conversion_v1 !== true) {
-    fail("use a compatible release with app_schema_conversion_v1 before the engine upgrade.");
-  }
-  const entries = [
-    {pin:cfg.schemaHash, definition:lastSecretSchema.schema, member:"secret_value"},
-    {pin:cfg.indexSchemaHash, definition:lastSecretIndexSchema.schema, member:"payload_json"},
-  ];
-  if (entries.some(({pin}) => !pin || !/^[a-f0-9]{64}$/.test(pin)) ||
-      new Set(entries.map(({pin}) => pin)).size !== 2) fail("two distinct saved definition identities are required.");
+  const initial = readFileSync(path, "utf8"), cfg = readConfig(path), scopePath = path + ".conversion.json";
+  if (!same(cfg, supplied)) fail("The caller and saved config differ. Reopen the selected config before conversion.");
+  if (options.abort && (!options.apply || !options.maintenance)) fail("Abort requires --apply --maintenance.");
+  let {raw:scopeRaw, saved} = readScope(scopePath);
+  const capabilities = object(data(await client.request("/api/version", "GET")).capabilities);
+  if (capabilities.app_schema_conversion_v1 !== true) fail("Use a compatible release with app_schema_conversion_v1 before the engine upgrade.");
   let report = await status(client);
   const pending = report && !terminal(report) ? report : undefined;
-  const checkScope = (current: Report) => {
-    if (current.schemas.length !== entries.length || current.converted_schemas.length !== entries.length ||
-        new Set(current.converted_schemas).size !== entries.length ||
-        new Set(current.schemas.map((item) => item?.schema)).size !== entries.length || current.schemas.some((item) =>
-          typeof item?.schema !== "string" || !current.converted_schemas.includes(item.schema)) ||
-        entries.some(({pin}) => current.schemas.filter((item) => item.expected_identity === pin).length !== 1)) {
-      fail("another conversion is active, or its saved identities differ. This command leaves it unchanged.");
+  if (pending && !saved) fail("An active conversion has no matching durable local scope. The node stays unchanged.");
+  const sources = await conversionSources(client, cfg, capabilities);
+  const requests = sources.map(({request}) => request), target = targetConfig(cfg, sources);
+  const sourceSha = sha(initial), targetSha = sha(configBytes(target));
+  if (saved) {
+    if (!same(saved.schemas, requests) || saved.target_config_sha256 !== targetSha ||
+        ![saved.source_config_sha256, saved.target_config_sha256].includes(sourceSha)) {
+      fail("The saved conversion request or config bytes differ. The node stays unchanged.");
     }
-  };
-  if (pending) checkScope(pending);
-  const step = async (action: string) => {
-    const changeId = report!.change_id;
-    const next = receipt(await client.request("/api/db/alternate-keys", "POST", {action, change_id:changeId}));
-    if (next.change_id !== changeId) fail("the conversion identity changed. Resume only after owner review.");
-    checkScope(next);
-    report = next;
-    return next;
-  };
-  if (options.abort) {
-    if (!options.apply || !options.maintenance || !pending) fail("abort requires an active conversion and --apply --maintenance.");
-    for (let page=0; page<100000; page++) {
-      await step("app_abort");
-      if (report!.phase === "aborted") return report!;
-    }
-    fail("the abort page limit stopped the command. Resume the same abort.");
+    checkMetadata(sources, saved, false);
+    checkRetirements(saved.retire, sources);
   }
-  const sources = await Promise.all(entries.map(async(entry) => {
-    const address = pending?.schemas.find((item) => item.expected_identity === entry.pin)?.schema ?? entry.pin!;
-    const response = data(await client.request(`/api/schema/${encodeURIComponent(address)}`, "GET"));
-    const source = object(response.schema ?? response);
-    const canonical = Boolean(cfg.schemaFieldAliases?.[entry.pin!]);
-    const definition = canonical ? canonicalSchema(entry.definition) : entry.definition;
-    if (source.identity_hash !== entry.pin || source.owner_app_id !== OWNER_APP_ID ||
-        source.descriptive_name !== definition.descriptive_name || typeof source.name !== "string" ||
-        source.schema_type !== definition.schema_type || !Array.isArray(source.fields) ||
-        !same([...source.fields].sort(), [...definition.fields].sort()) ||
-        !same([object(source.key).hash_field, object(source.key).range_field ?? null], [definition.key.hash_field, null]) ||
-        !same(source.field_types, definition.field_types) || !same(source.field_descriptions, definition.field_descriptions) ||
-        Object.keys(object(source.field_mappers)).length || Object.keys(object(source.transform_fields)).length) {
-      fail("an installed schema differs from the saved app definition. Review it before conversion.");
-    }
-    const member = cfg.schemaFieldAliases?.[entry.pin!]?.[entry.member] ?? entry.member;
-    return {entry, source, canonical, request:{schema:source.name, expected_identity:entry.pin,
-      alternate_keys:{}, membership:{kind:"field_exists", field:member}}};
-  }));
-  const names = sources.map(({source}) => source.name as string);
-  if (new Set(names).size !== entries.length) fail("two app schemas resolve to the same runtime address.");
-  if (!pending && sources.every(({source}) => source.independent_fields === true)) {
-    return {phase:"complete", already_converted:true, converted_schemas:names};
+  if (pending) {
+    checkScope(pending, saved!);
+    if (saved!.retire.length && capabilities.app_schema_alias_retirement_v1 !== true) fail("The saved retirements require app_schema_alias_retirement_v1.");
   }
-  if (!pending && sources.some(({source}) => source.independent_fields === true)) fail("the installed schema models differ.");
-  let retire = pending?.retired_schemas ?? [];
+  if (saved && report?.phase === "aborted" && report.change_id === saved.change_id) {
+    checkScope(report, saved);
+    if (sourceSha !== saved.source_config_sha256) fail("The aborted conversion does not match the source config bytes.");
+    if (options.apply && scopeRaw) removeScope(scopePath, scopeRaw);
+    return {phase:"aborted", local_cleanup_required:!options.apply};
+  }
+  if (options.abort && !pending) {
+    if (saved && !saved.change_id && saved.source_config_sha256 === sourceSha && scopeRaw) {
+      removeScope(scopePath, scopeRaw);
+      return {phase:"aborted", prepared_scope_only:true};
+    }
+    return fail("No unpublished conversion belongs to this saved scope.");
+  }
+  const allOwned = sources.every(({source}) => source.independent_fields === true);
+  if (!pending && allOwned) {
+    if (saved) {
+      if (report?.phase !== "complete" || saved.target_config_sha256 !== sourceSha) fail("The saved scope is incomplete.");
+      checkScope(report, saved);
+      if (report.selected_keys !== report.expected_selected_keys || report.processed_keys !== report.expected_keys) fail("The complete receipt has incomplete membership.");
+    }
+    if (options.apply) {
+      writeConfig(target, path, initial, scopeRaw ?? undefined);
+      if (saved && scopeRaw) removeScope(scopePath, scopeRaw);
+    }
+    return {phase:"complete", already_converted:true, converted_schemas:requests.map((item) => item.schema)};
+  }
+  if (!pending && sources.some(({source}) => source.independent_fields === true)) fail("The app mixes old and owned schema values. Owner review is required.");
+  // A prepared scope must re-prove aliases. A running job uses only its exact saved retire list.
+  const retire = pending ? saved!.retire : await aliasRetirements(client, sources, capabilities);
+  if (!options.apply) return {phase:"plan", schemas:requests, retire};
+  if (!options.maintenance) fail("Use --apply --maintenance for the explicit node request pause.");
   if (!pending) {
-    const catalog = data(await client.nativeBatch.schemas());
-    if (catalog.ready !== true || !Array.isArray(catalog.schemas)) fail("the schema directory is not ready.");
-    const aliases = catalog.schemas.map(object).filter((item) => sources.some(({entry}) =>
-      item.name === `${OWNER_APP_ID}/${entry.definition.name}`) && !names.includes(String(item.name)));
-    retire = await Promise.all(aliases.map(async(alias) => {
-      const response = data(await client.request(`/api/schema/${encodeURIComponent(String(alias.name))}`, "GET"));
-      const schema = object(response.schema ?? response);
-      const mappings = Object.values(object(schema.field_mappers));
-      if (schema.owner_app_id !== OWNER_APP_ID || schema.independent_fields === true || !mappings.length ||
-          mappings.some((value) => typeof value !== "string" || !names.includes(value.split(".")[0]!))) {
-        fail("a local alias has values outside the kept sources. Review it before conversion.");
+    const scope: ConversionScope = {source_config_sha256:sourceSha, target_config_sha256:targetSha,
+      change_id:"", schemas:requests, retire, source_metadata:Object.fromEntries(sources.map(({request, metadata}) => [request.schema, metadata]))};
+    if (saved && !same(saved, scope)) fail("A different saved conversion scope requires owner review.");
+    scopeRaw = saveScope(scopePath, scope, scopeRaw);
+    saved = scope;
+    fence(path, scopeRaw, saved);
+    report = receipt(await client.request(ROUTE, "POST", {action:"app_begin", schemas:requests, retire, maintenance:true}));
+    checkScope(report, saved);
+  }
+  if (!saved || !report || !scopeRaw) return fail("The durable conversion scope is absent.");
+  // A lost begin reply can bind only the exact full durable request, including for abort.
+  if (!saved.change_id) {
+    saved = {...saved, change_id:report.change_id};
+    scopeRaw = saveScope(scopePath, saved, scopeRaw);
+  }
+  checkMetadata(await conversionSources(client, cfg, capabilities), saved, false);
+  for (let page = 0; page < 100000; page++) {
+    const raw = fence(path, scopeRaw, saved);
+    checkScope(report, saved);
+    let action: string;
+    if (terminal(report)) {
+      if ((report.phase === "complete" && sha(raw) !== saved.target_config_sha256) ||
+          (report.phase === "aborted" && sha(raw) !== saved.source_config_sha256)) fail("The terminal receipt and config bytes differ.");
+      removeScope(scopePath, scopeRaw);
+      return report;
+    }
+    if (options.abort) {
+      if (!["backfill", "verifying", "verified", "aborting"].includes(report.phase) || sha(raw) !== saved.source_config_sha256) {
+        fail("A published conversion cannot abort.");
       }
-      return String(schema.name);
-    }));
+      action = "app_abort";
+    } else if (["backfill", "verifying"].includes(report.phase)) action = "app_page";
+    else if (report.phase === "verified") action = "app_commit";
+    else if (report.phase === "retiring") action = "app_cleanup";
+    else if (report.phase === "ready") {
+      if (report.selected_keys !== report.expected_selected_keys || report.processed_keys !== report.expected_keys) fail("The conversion membership is incomplete.");
+      checkMetadata(await conversionSources(client, cfg, capabilities), saved, true);
+      writeConfig(target, path, fence(path, scopeRaw, saved), scopeRaw);
+      action = "app_finish";
+    } else return fail(`Conversion ${report.change_id} remains in ${report.phase}. Resume or abort that saved scope.`);
+    report = receipt(await client.request(ROUTE, "POST", {action, change_id:report.change_id}));
+    checkScope(report, saved);
   }
-  if (!options.apply) return {phase:"plan", schemas:sources.map(({request}) => request), retire};
-  if (!options.maintenance) fail("use --apply --maintenance to authorize the request pause and conversion.");
-  if (!pending) {
-    report = receipt(await client.request("/api/db/alternate-keys", "POST", {action:"app_begin",
-      schemas:sources.map(({request}) => request), retire, maintenance:true}));
-    checkScope(report);
-  }
-  try {
-    for (let page=0; ["backfill", "verifying"].includes(report!.phase) && page<100000; page++) await step("app_page");
-    if (report!.phase === "verified") await step("app_commit");
-    for (let page=0; report!.phase === "retiring" && page<100000; page++) await step("app_cleanup");
-    if (report!.phase !== "ready" || report!.selected_keys !== report!.expected_selected_keys) {
-      fail("the conversion is incomplete. Resume the same command.");
-    }
-    const current = await Promise.all(names.map(async(name) => {
-      const response = data(await client.request(`/api/schema/${encodeURIComponent(name)}`, "GET"));
-      return object(response.schema ?? response);
-    }));
-    if (current.some((schema, position) => schema.independent_fields !== true ||
-        schema.identity_hash !== entries[position]!.pin || Object.keys(object(schema.alternate_keys)).length)) {
-      fail("the published schema ownership or identity differs. The config stays unchanged.");
-    }
-    if (!same(readConfig(configPath), cfg)) fail("the config changed. Review it before resume.");
-    const fieldProfiles = Object.assign({}, cfg.schemaFieldAliases, ...sources.filter(({canonical}) => canonical)
-      .map(({entry,source}) => profilesFor(entry.definition, [entry.pin!, String(source.name)])));
-    writeConfig({...cfg, schemaName:names[0], indexSchemaName:names[1],
-      schemaFieldAliases:Object.keys(fieldProfiles).length ? fieldProfiles : undefined}, configPath);
-    const finished = await step("app_finish");
-    if (finished.phase !== "complete") fail("the final receipt is incomplete. Resume the same command.");
-    return finished;
-  } catch {
-    fail(`conversion ${report!.change_id} remains in ${report!.phase}. Resume this command; use --abort only before publication.`);
-  }
+  return fail("The page limit stopped the command. Resume the same saved conversion.");
 }
