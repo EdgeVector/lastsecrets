@@ -202,7 +202,12 @@ def arm(args, Node, finish_setup, label, pair):
                     "Repeated setup changed a saved definition identity")
             require(snapshot(node, config, expected) == before, "Repeated setup changed a field atom")
             owned = [schema for schema in node.call("/api/schemas")[0]["schemas"] if schema.get("owner_app_id") == "lastsecrets"]
-            require(len(owned) == 2 and all(schema.get("independent_fields") is True for schema in owned),
+            # A node at API 13 or later (lastdb #803) owns every schema and may omit the key.
+            version = node.call("/api/version")[0]
+            api_version = (version.get("data") or version).get("api_version", 0)
+            owns = lambda schema: schema.get("independent_fields") is True or (
+                "independent_fields" not in schema and api_version >= 13)
+            require(len(owned) == 2 and all(owns(schema) for schema in owned),
                     "The actual app does not own exactly two schemas")
             require(all(not schema.get("alternate_keys") for schema in owned), "Different record types became alternate keys")
         for index in range(args.records):
