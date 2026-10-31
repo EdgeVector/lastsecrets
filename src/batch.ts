@@ -212,15 +212,22 @@ export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
   const secretCanonical = Boolean(config.schemaFieldAliases?.[config.schemaHash]);
   const indexCanonical = Boolean(config.indexSchemaHash && config.schemaFieldAliases?.[config.indexSchemaHash]);
   return {
-    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, secretCanonical ? undefined : config.schemaName),
-    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, indexCanonical ? undefined : config.indexSchemaName),
+    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, config.schemaName, secretCanonical),
+    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, config.indexSchemaName, indexCanonical),
   };
 }
 function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,
-  configuredHash?: string, configuredName?: string): string {
-  const route = configuredName && configuredName.length > 0 ? configuredName : configuredHash;
+  configuredHash?: string, configuredName?: string, canonical = false): string {
+  let route = canonical ? configuredHash : configuredName || configuredHash;
   if (!configuredHash || !/^[a-f0-9]{64}$/.test(configuredHash) || !route) {
     throw new DeleteError("configured_schema_identity_mismatch");
+  }
+  const independent = schemas.filter((value) => object(value).independent_fields === true && object(value).identity_hash === configuredHash);
+  if (independent.length > 1) throw new DeleteError("schema_owner_identity_ambiguous");
+  if (independent.length === 1) {
+    const name = object(independent[0]).name;
+    if (typeof name !== "string" || (configuredName && configuredName !== name)) throw new DeleteError("configured_schema_identity_mismatch");
+    route = name;
   }
   // Pin the same literal route as get/put. Retirement only controls descriptive-name resolution.
   const matches = schemas.filter((value) => object(value).name === route);
@@ -229,7 +236,7 @@ function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.s
   const key = object(schema.key);
   if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
       schema.state !== "Available" || typeof schema.name_claim_retired !== "boolean" ||
-      typeof schema.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(schema.identity_hash) ||
+      schema.identity_hash !== configuredHash ||
       schema.schema_type !== definition.schema_type || key.hash_field !== definition.key.hash_field ||
       (key.range_field !== undefined && key.range_field !== null) ||
       !Array.isArray(schema.fields) || schema.fields.length !== definition.fields.length ||

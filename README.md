@@ -24,6 +24,13 @@ contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
+New homes require LastDB capability `owned_app_schemas_v1`.
+The app declares independent values for secret records and the metadata summary.
+Canonical field definitions stay reusable. They do not share record values.
+These are separate record types, so this change adds no alternate key.
+An old home with shared values moves to this release only by the home copy. See "Existing homes" below.
+An alternate key does not prove that the schema owns its values.
+
 The initial schema contract is defined in `src/schema.ts`.
 
 `secret_value` is deliberately a normal object field with secret/no-index classifications. Secrecy is a field policy, not a distinct primitive value type.
@@ -211,8 +218,42 @@ The map does not copy records or add another molecule.
 A config without this map retains its existing data path.
 
 CAUTION: New canonical names produce new schema identities.
-A config without a field map keeps legacy declarations and the unknown-schema retry.
-`init` and `publish` also keep that path when they find legacy local schemas.
-Only a fresh home or a config with a field map uses the new vocabulary.
-An explicit migration must preserve the old values before a legacy home changes its definitions.
-`init` and `publish` do not perform that migration.
+A config without a field map keeps its existing field names.
+All new declarations require schema-owned values, with or without a field map.
+`init` and `publish` refuse shared values before the first declaration.
+They also refuse a change to a saved definition identity.
+The config write uses an atomic replacement and flushes the file and its directory.
+Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
+
+## Existing homes
+
+This release does not change a home in place. It has no command for old homes.
+
+CAUTION: Do not start this release on a home that holds the old shared-value LastSecrets layout.
+`init` and `publish` refuse that home with `home_copy_required` and make no change.
+
+An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
+
+1. The home copy reads the old home. It does not change the old home.
+2. The home copy writes the `LastSecret` and `LastSecretIndex` records, with the secret values, to a new home.
+3. This release initializes the new home with `lastsecrets init`.
+4. The old home stays unchanged as the recovery point.
+
+A primary change requires Tom's authorization.
+
+## CI comparison
+
+The CI latency comparison uses the actual CLI and two exact daemon revisions.
+The main app runs on the compatible daemon. This app runs on the removal daemon.
+Each arm creates its own fresh home. No arm changes an old home.
+Two AB/BA pairs start with 64 records and 4096 bytes per value.
+Every operation retains 64 calls per arm.
+Complete values, metadata membership, current atoms, deletion, repeat setup, and reopen remain required.
+Latency includes the CLI process and all requests; it does not isolate database latency.
+
+Each timed call retains child CPU time and bounded daemon and host counter observations.
+The counter reads occur outside the timer and change the gaps between calls for both sources.
+Results with those observations form a separate experiment from earlier runs without them.
+The summary also shows create and update tails for each arm. No sample is removed or trimmed.
+Host pressure shows shared load; it does not prove the cause of a request delay.
+Missing counters stay unreported. Raw observations pass the output audit before artifact upload.

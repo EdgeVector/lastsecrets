@@ -4,7 +4,7 @@ import { canonicalSchema } from "./canonical-vocabulary.ts";
 import vocabulary from "./canonical-fields.json" with { type: "json" };
 import pkg from "../package.json" with { type: "json" };
 import { OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
-import { defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
+import { ConfigError, defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
 import {
   defaultNodeUrl,
   newLastDbClient,
@@ -73,7 +73,9 @@ export async function run(
       const socketPath = resolveSocketPath(opts.socketPath);
       const configPath = opts.config ?? defaultConfigPath();
       let existing: Config | null = null;
-      try { existing = readConfig(configPath); } catch { /* no usable config */ }
+      try { existing = readConfig(configPath); } catch (error) {
+        if (!(error instanceof ConfigError) || error.code !== "config_missing") throw error;
+      }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
       const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
@@ -82,12 +84,14 @@ export async function run(
       });
       // Mini owns resolve/registration and must return Schema Service catalog
       // identities; private visibility is not a local-only schema mode.
-      const { canonical, schemaName } = await client.declareAppSchema(
-        OWNER_APP_ID,
-        lastSecretSchema.schema,
-      );
-      const { canonical: indexCanonical, schemaName: indexSchemaName } =
-        await client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema);
+      const [{ canonical, schemaName }, { canonical: indexCanonical, schemaName: indexSchemaName }] =
+        await Promise.all([
+          client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema),
+          client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema),
+        ]);
+      if (existing && (existing.schemaHash !== canonical || existing.indexSchemaHash !== indexCanonical)) {
+        throw new Error("The installed schema identities differ from this config. The config stays unchanged.");
+      }
       writeConfig(
         {
           configVersion: 1,
@@ -119,13 +123,23 @@ export async function run(
       const socketPath = resolveSocketPath(opts.socketPath);
       const configPath = opts.config ?? defaultConfigPath();
       let existing: Config | null = null;
-      try { existing = readConfig(configPath); } catch { /* no usable config */ }
+      try { existing = readConfig(configPath); } catch (error) {
+        if (!(error instanceof ConfigError) || error.code !== "config_missing") throw error;
+      }
       const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
       const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
         schemaFieldAliases:existing?.schemaFieldAliases,
         canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
       });
+
+      const [secret, summary] = await Promise.all([
+        client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema),
+        client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema),
+      ]);
+      if (existing && (existing.schemaHash !== secret.canonical || existing.indexSchemaHash !== summary.canonical)) {
+        throw new Error("The installed schema identities differ from this config. Publication leaves the config unchanged.");
+      }
 
       const registered = await client.registerForDistribution(OWNER_APP_ID, [
         lastSecretSchema.schema,
@@ -160,6 +174,9 @@ export async function run(
       // Keep local config pinned to the registered identities when possible.
       const primary = registered.items.find((i) => i.schema_name.endsWith("/LastSecret"));
       const indexItem = registered.items.find((i) => i.schema_name.endsWith("/LastSecretIndex"));
+      if (primary?.identity_hash !== secret.canonical || indexItem?.identity_hash !== summary.canonical) {
+        throw new Error("Distribution identities differ from the installed owned schemas. The config stays unchanged.");
+      }
       if (primary?.identity_hash) {
         writeConfig(
           {
@@ -167,10 +184,9 @@ export async function run(
             nodeUrl: existing?.nodeUrl ?? nodeUrl,
             userHash: existing?.userHash ?? userHash,
             schemaHash: primary.identity_hash,
-            schemaName: primary.schema_name || "lastsecrets/LastSecret",
+            schemaName: secret.schemaName,
             indexSchemaHash: indexItem?.identity_hash ?? existing?.indexSchemaHash,
-            indexSchemaName:
-              indexItem?.schema_name || existing?.indexSchemaName || "lastsecrets/LastSecretIndex",
+            indexSchemaName: summary.schemaName,
             nodeSocketPath: existing?.nodeSocketPath ?? socketPath,
             schemaFieldAliases:client.schemaFieldAliases,
           },
@@ -271,7 +287,7 @@ export async function run(
         socketPath: rawConfig.nodeSocketPath,
         userHash: rawConfig.userHash, schemaFieldAliases:rawConfig.schemaFieldAliases,
       });
-      const config = await ensureStorageSchemas(secrets, rawConfig);
+      const config = rawConfig;
       const brain = newBrainClient({
         nodeUrl: config.nodeUrl,
         socketPath: config.nodeSocketPath,
@@ -377,41 +393,7 @@ export async function initCliSentry(
   }
 }
 
-/** True when the pinned config already names both storage schemas. */
-function hasPinnedSchemaNames(config: Config): boolean {
-  return Boolean(config.schemaName && config.indexSchemaName);
-}
-
-/**
- * Only `lastsecrets init` declares schemas. Every other command trusts the
- * names pinned in config: a declare on each run costs two POSTs to
- * /api/schemas/declare (audit append, alias persistence, catalog insert) and
- * made `peer:lastsecrets` the top schema-op caller on the node. A legacy config
- * without both names declares once, in memory.
- */
-async function ensureStorageSchemas(
-  client: ReturnType<typeof newLastDbClient>,
-  config: Config,
-): Promise<Config> {
-  return hasPinnedSchemaNames(config) ? config : declareStorageSchemas(client, config);
-}
-
-/** True when a node error says the pinned schema is not known to the node. */
-export function isUnknownSchemaError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  const code = err instanceof Error ? (err as { code?: unknown }).code : undefined;
-  if (typeof code === "string" && !/^node_http_(400|404|422)$/.test(code)) return false;
-  return (
-    /schema/i.test(message) &&
-    /(unknown|not found|not loaded|not registered|no such|does not exist)/i.test(message)
-  );
-}
-
-/**
- * Run a storage operation against the pinned schemas without declaring first.
- * If the first real call fails with an unknown-schema error, declare once and
- * retry once.
- */
+/** Ordinary requests use the saved addresses and never declare or retry a write. */
 async function withStorage<T>(
   deps: Deps,
   configPath: string | undefined,
@@ -424,29 +406,7 @@ async function withStorage<T>(
     userHash: config.userHash,
     schemaFieldAliases:config.schemaFieldAliases,
   });
-  const initial = await ensureStorageSchemas(client, config);
-  try {
-    return await fn(client, initial);
-  } catch (err) {
-    if (!hasPinnedSchemaNames(config) || !isUnknownSchemaError(err)) throw err;
-    return fn(client, await declareStorageSchemas(client, config));
-  }
-}
-
-async function declareStorageSchemas(
-  client: ReturnType<typeof newLastDbClient>,
-  config: Config,
-): Promise<Config> {
-  const declared = await client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema);
-  const declaredIndex = await client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema);
-  return {
-    ...config,
-    schemaHash: declared.canonical,
-    schemaName: declared.schemaName,
-    indexSchemaHash: declaredIndex.canonical,
-    indexSchemaName: declaredIndex.schemaName,
-    schemaFieldAliases:client.schemaFieldAliases,
-  };
+  return fn(client, config);
 }
 
 type Options = {
@@ -541,7 +501,7 @@ function usage(): string {
     "       lastsecrets migrate --schema NAME[,NAME] --fields FIELD[,FIELD] [--apply] [--log PATH]",
     "       lastsecrets guard [PATH...]",
     "",
-    "init     — resolve/register schemas through Mini and pin catalog identities.",
+    "init     — declare schema-owned values through Mini and pin definition identities.",
     "publish  — add distribution governance and verify Schema Service identities.",
     "admin-slice — emit metadata-only JSON for the admin delivery path.",
     "delete   — delete exact local slugs and repair metadata; emit a value-free JSON receipt.",

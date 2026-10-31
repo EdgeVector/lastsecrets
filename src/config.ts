@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import { normalizeNodeUrl } from "./lastdb.ts";
 
@@ -53,12 +54,32 @@ export function readConfig(path = defaultConfigPath()): Config {
   return assertConfigShape(path, parsed);
 }
 
+function configBytes(config: Config): string {
+  const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, ordered(item)])) : value;
+  return JSON.stringify(ordered(config), null, 2) + "\n";
+}
+
 export function writeConfig(config: Config, path = defaultConfigPath()): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const parent = dirname(path);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`);
+  const file = openSync(temporary, "wx", 0o600);
+  try {
+    try {
+      writeFileSync(file, configBytes(config), "utf8");
+      fsyncSync(file);
+    } finally { closeSync(file); }
+    renameSync(temporary, path);
+    const directory = openSync(parent, "r");
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  } finally {
+    // Only our exclusive temporary file can remain after a failed write.
+    try { unlinkSync(temporary); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
 }
 
 function assertConfigShape(path: string, raw: unknown): Config {

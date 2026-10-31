@@ -28,6 +28,16 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 
 # LastSecrets Agent Instructions
 
+## Schema-owned values (Tom, 2026-10-29)
+
+New homes use independent values for the secret schema and the metadata summary schema.
+These schemas hold different records. Do not combine them as alternate keys.
+Canonical field reuse supplies definitions only. It does not share record values.
+An old home with shared values moves only by the home copy (EdgeVector/last-stack#377).
+`init` and `publish` refuse that home with `home_copy_required`. The app has no in-place command for old homes.
+Field aliases select field names; they never select the record-ownership model.
+Do not change the primary during source or CI work.
+
 Use LastSecrets for all secret writes and reads in this repo.
 
 - Store raw values only with `lastsecrets put <slug> ... --value-stdin`.
