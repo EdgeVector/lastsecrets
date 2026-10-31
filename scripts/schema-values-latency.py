@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted-CI latency for the actual CLI across conversion and a daemon upgrade."""
+"""Hosted-CI latency for the actual CLI. Each app version starts on its own fresh home."""
 import argparse
 import hashlib
 import json
@@ -92,8 +92,8 @@ def command(binary, node, config, verb, *arguments, payload=None, allow_failure=
         with (config.parent / "cli-observations.jsonl").open("a") as stream:
             stream.write(json.dumps(observation, sort_keys=True) + "\n")
     # CLI output can contain a generated value. Never copy it into an error or log.
-    if result.returncode and verb in ("init", "schema-values-convert"):
-        # These control commands never fetch value bytes. The output audit
+    if result.returncode and verb == "init":
+        # This control command never fetches value bytes. The output audit
         # still checks this file before any artifact upload.
         (config.parent / f"failed-{verb}.stderr").write_text(result.stderr)
     require(result.returncode == 0 or allow_failure, f"Actual CLI {verb} failed; no value is retained in this error")
@@ -155,7 +155,7 @@ def snapshot(node, config, expected, absent=()):
             for field in query["fields"]:
                 info = metadata.get(field, {})
                 require(isinstance(info.get("atom_uuid"), str) and info["atom_uuid"], "A field lacks its current atom identity")
-                # Molecules change at conversion. Current atoms and author metadata must not.
+                # Reopen and repeated setup must keep current atoms and author metadata.
                 atoms[f"{query['schema_name']}/{key}/{field}"] = {name: info.get(name)
                     for name in ("atom_uuid", "writer_pubkey", "metadata")}
     return atoms
@@ -165,9 +165,10 @@ def arm(args, Node, finish_setup, label, pair):
     from app_multi_key_compare import require_cloud_off
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
-    fresh = label == "fresh"
-    binary = args.candidate if label != "baseline" else args.baseline
-    daemon, revision = (args.daemon_after, args.daemon_after_revision) if fresh else (args.daemon_before, args.daemon_before_revision)
+    candidate = label == "candidate"
+    # The main app runs on the compatible daemon. This app runs on the removal daemon.
+    binary = args.candidate if candidate else args.baseline
+    daemon, revision = (args.daemon_after, args.daemon_after_revision) if candidate else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
                 full_socket_name="folddb-full.sock", environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
@@ -177,34 +178,24 @@ def arm(args, Node, finish_setup, label, pair):
     try:
         node.start()
         require_cloud_off(node, output, "before-setup")
-        setup = args.candidate if fresh else args.baseline
-        command(setup, node, config, "init", "--socket", str(node.socket))
+        # Each arm sets up its own fresh home. No arm changes an old home.
+        command(binary, node, config, "init", "--socket", str(node.socket))
         # Individual CLI calls define the latency workload. Verification batches all known keys.
         for index in range(args.records):
-            put(setup, node, config, index)
+            put(binary, node, config, index)
         original_config = json.loads(config.read_text())
         before = snapshot(node, config, expected)
         save(output / "before-atoms.json", before)
-        if label == "candidate":
-            plan = json.loads(command(binary, node, config, "schema-values-convert")[0].stdout)
-            require(plan.get("phase") == "plan" and len(plan.get("schemas", [])) == 2, "The normal app did not return its conversion plan")
-            report = json.loads(command(binary, node, config, "schema-values-convert", "--apply", "--maintenance")[0].stdout)
-            require(report.get("phase") == "complete" and report.get("durable") is True and
-                    report.get("selected_keys") == report.get("expected_selected_keys") == args.records + 1,
-                    "The actual app conversion is incomplete")
-            save(output / "conversion.json", report)
         require_cloud_off(node, output, "after-setup")
         finish_setup(node, output)
         node.stop()
-        if label == "candidate":
-            node.binary, node.revision = args.daemon_after, args.daemon_after_revision
         node.start()
         require_cloud_off(node, output, "before-measure")
-        # Read known values first; a repeated init must not hide an upgrade failure.
+        # Read known values first; a repeated init must not hide a reopen failure.
         after = snapshot(node, config, expected)
-        require(before == after, "Conversion or reopen changed a current atom or author metadata")
+        require(before == after, "Reopen changed a current atom or author metadata")
         save(output / "after-atoms.json", after)
-        if label != "baseline":
+        if candidate:
             command(binary, node, config, "init", "--socket", str(node.socket))
             current = json.loads(config.read_text())
             require(all(current[name] == original_config[name] for name in ("schemaHash", "indexSchemaHash")),
@@ -253,7 +244,8 @@ def arm(args, Node, finish_setup, label, pair):
             [row["elapsed_ms"] for row in observations if row["operation"] == operation] == samples[operation]
             for operation in OPERATIONS), "The CLI observations do not match every timed sample")
         result = {"label":label,"pair":pair,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
-                  "remaining":len(expected),"unchanged_seed_atoms":len(before),"repeat_setup":label != "baseline",
+                  "remaining":len(expected),"unchanged_seed_atoms":len(before),"repeat_setup":candidate,
+                  "daemon_revision":revision,"fresh_home":True,
                   "reopen":True,"batch_delete":True,"disk":node.disk_breakdown(),
                   "cli_observations": {"count":len(observations),"sha256":hashlib.sha256(
                       (output / "cli-observations.jsonl").read_bytes()).hexdigest()}}
@@ -264,13 +256,14 @@ def arm(args, Node, finish_setup, label, pair):
 
 
 def render(args, summary):
-    lines = ["## LastSecrets conversion and CLI latency", "",
-             f"App: `{args.baseline_revision}` → `{args.candidate_revision}`.",
-             f"Compatible daemon: `{args.daemon_before_revision}`. Removal daemon: `{args.daemon_after_revision}`.",
+    lines = ["## LastSecrets fresh-home CLI latency", "",
+             f"Main app `{args.baseline_revision}` on the compatible daemon `{args.daemon_before_revision}`.",
+             f"This app `{args.candidate_revision}` on the removal daemon `{args.daemon_after_revision}`.",
              f"Two balanced AB/BA pairs use {args.records} seed records and 4096 bytes per value, plus equal timed creates.",
              f"Each operation retains {args.records} actual CLI samples per arm.",
-             "The candidate converts on the compatible daemon, then reopens the same home on the removal daemon.",
-             "A separate fresh-init arm uses the removal daemon. Current atom identities and author metadata remain equal across conversion and reopen.",
+             "Each arm creates its own fresh home. No arm changes an old home.",
+             "Current atom identities and author metadata remain equal across reopen. This app also repeats setup.",
+             "Timings are advisory.",
              "Times include the CLI process and all app requests. They do not isolate database latency.", "",
              "| Operation | Before P50 ms | After P50 ms | Before P95 ms | After P95 ms | P95 change |", "|---|---:|---:|---:|---:|---:|"]
     for operation in OPERATIONS:
@@ -331,7 +324,7 @@ def main():
     summary = {"complete":False,"sources":{name:str(item) for name,item in vars(args).items()},"arms":[],
                "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon_before","daemon_after")}}
     try:
-        for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"),("fresh",))):
+        for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"))):
             for label in order:
                 summary["arms"].append(arm(args,Node,finish_setup,label,pair))
         text = render(args, summary)

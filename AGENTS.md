@@ -33,7 +33,8 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 New homes use independent values for the secret schema and the metadata summary schema.
 These schemas hold different records. Do not combine them as alternate keys.
 Canonical field reuse supplies definitions only. It does not share record values.
-Existing shared values require explicit data conversion on a compatible release before setup or publication.
+An old home with shared values moves only by the home copy (EdgeVector/last-stack#377).
+`init` and `publish` refuse that home with `home_copy_required`. The app has no in-place command for old homes.
 Field aliases select field names; they never select the record-ownership model.
 Do not change the primary during source or CI work.
 

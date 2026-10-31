@@ -55,8 +55,6 @@ export type VerifyDistributionReadyResult = {
 export type LastDbClient = {
   readonly schemaFieldAliases?: FieldAliasProfiles;
   nativeBatch: NativeBatchClient;
-  /** Owner control requests use the same transport and timeout as other calls. */
-  request(path: string, method: "GET" | "POST", body?: unknown): Promise<unknown>;
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(
     appId: string,
@@ -248,12 +246,6 @@ export function newLastDbClient(opts: {
     const text = await response.text();
     const parsed = parseBody(text);
     if (!response.ok) {
-      // The owner error route uses plain text. Match only this exact control
-      // response; arbitrary response bodies must never enter a secret error.
-      if (response.status === 404 && method === "POST" && path === "/api/db/alternate-keys" &&
-          objectString(body, "action") === "app_status" && parsed === "app conversion is absent") {
-        throw new LastSecretsError("app_conversion_absent", "No app conversion exists.");
-      }
       throw new LastSecretsError(
         `node_http_${response.status}`,
         `LastDB ${method} ${path} returned HTTP ${response.status}${safeBodyMessage(parsed)}`,
@@ -262,8 +254,7 @@ export function newLastDbClient(opts: {
     return parsed;
   };
 
-  // Existing field names can survive conversion. A field map selects names;
-  // it never selects the record-ownership model.
+  // A field map selects field names. It never selects the record-ownership model.
   let canonicalMode: boolean | undefined = opts.canonicalVocabulary === "auto"
     ? undefined : opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
   let vocabularyReadiness: Promise<boolean> | undefined;
@@ -289,7 +280,6 @@ export function newLastDbClient(opts: {
   return {
     get schemaFieldAliases() { return canonicalMode === true ? {...fieldProfiles} : undefined; },
     nativeBatch: newNativeBatchClient(sdkTransport),
-    request: callJson,
     async autoIdentity() {
       const body = await callJson("/api/system/auto-identity", "GET");
       const userHash = objectString(body, "user_hash");

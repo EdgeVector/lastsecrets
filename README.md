@@ -28,7 +28,7 @@ New homes require LastDB capability `owned_app_schemas_v1`.
 The app declares independent values for secret records and the metadata summary.
 Canonical field definitions stay reusable. They do not share record values.
 These are separate record types, so this change adds no alternate key.
-Existing shared values require explicit data conversion on a compatible release before setup or publication.
+An old home with shared values moves to this release only by the home copy. See "Existing homes" below.
 An alternate key does not prove that the schema owns its values.
 
 The initial schema contract is defined in `src/schema.ts`.
@@ -222,30 +222,32 @@ A config without a field map keeps its existing field names.
 All new declarations require schema-owned values, with or without a field map.
 `init` and `publish` refuse shared values before the first declaration.
 They also refuse a change to a saved definition identity.
-An explicit conversion must preserve old values on a compatible LastDB release before the engine upgrade.
-`lastsecrets schema-values-convert` shows the plan and reads no raw secret values.
-The command checks both saved definitions, the owner, fields, types, keys, and aliases.
-It selects secret records through the secret-value field and metadata records through the metadata-list field.
-LastDB freezes the source keys, checks counters and value coverage, and preserves atom references and clocks.
-It refuses uncovered values, retained conflicts, or suspect counters.
-The client checks each durable phase receipt and saves the unchanged definition pins with the resulting runtime names.
-The config write uses an atomic replacement and flushes the file and its directory before the command resumes requests.
-
-CAUTION: The command pauses requests across the node.
-Use `lastsecrets schema-values-convert --apply --maintenance` on the compatible release before the engine upgrade.
-The compatible release must return HTTP 404 for an absent conversion. Other status failures stop this command.
-
-Existing format 4 and 5 homes require format 6 before conversion.
-Use the supervised upgrade procedure. Stop the selected daemon, then run `lastdb db enable-alternate-keys` for that home.
-Start the compatible release before the app conversion. A primary change requires Tom's authorization.
-
-Repeat the same command after an interruption. Use `--abort --apply --maintenance` only before publication.
-CI conversion and latency results remain required before release.
+The config write uses an atomic replacement and flushes the file and its directory.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
 
+## Existing homes
+
+This release does not change a home in place. It has no command for old homes.
+
+CAUTION: Do not start this release on a home that holds the old shared-value LastSecrets layout.
+`init` and `publish` refuse that home with `home_copy_required` and make no change.
+
+An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
+
+1. The home copy reads the old home. It does not change the old home.
+2. The home copy writes the `LastSecret` and `LastSecretIndex` records, with the secret values, to a new home.
+3. This release initializes the new home with `lastsecrets init`.
+4. The old home stays unchanged as the recovery point.
+
+A primary change requires Tom's authorization.
+
+## CI comparison
+
 The CI latency comparison uses the actual CLI and two exact daemon revisions.
+The main app runs on the compatible daemon. This app runs on the removal daemon.
+Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.
-Every operation retains 64 calls per arm. A separate arm checks fresh setup.
+Every operation retains 64 calls per arm.
 Complete values, metadata membership, current atoms, deletion, repeat setup, and reopen remain required.
 Latency includes the CLI process and all requests; it does not isolate database latency.
 

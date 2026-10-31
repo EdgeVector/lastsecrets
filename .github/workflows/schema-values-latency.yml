@@ -22,7 +22,7 @@ env:
   ENVIRONMENT: dev
 jobs:
   compare:
-    name: Actual CLI conversion and latency
+    name: Actual CLI fresh-home latency
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -93,7 +93,7 @@ jobs:
           cd "$RUNNER_TEMP/lastsecrets-binaries"
           sha256sum daemon-before daemon-after baseline candidate > SHA256SUMS
           sha256sum --check SHA256SUMS
-      - name: Compare normal app operations across conversion and upgrade
+      - name: Compare normal app operations on fresh homes
         id: operations
         run: |
           python3 candidate/scripts/schema-values-latency.py \

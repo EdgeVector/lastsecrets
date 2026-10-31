@@ -30,7 +30,6 @@ import {
   type ScanTarget,
 } from "./migrate.ts";
 import { guardPaths, renderGuardReport } from "./guard.ts";
-import { convertSchemaValues } from "./schema-conversion.ts";
 import { writeFileSync } from "node:fs";
 
 type Io = {
@@ -68,16 +67,6 @@ export async function run(
       io.stdout.write(`${secretRef(arg)}\n`);
       return 0;
     }
-    if (command === "schema-values-convert") {
-      const opts = parseOptions([arg, ...rest].filter((value): value is string => value !== undefined));
-      const configPath = opts.config ?? defaultConfigPath();
-      const config = readConfig(configPath);
-      const client = cliDeps.newClient({nodeUrl:config.nodeUrl, socketPath:config.nodeSocketPath,
-        userHash:config.userHash, schemaFieldAliases:config.schemaFieldAliases});
-      const result = await convertSchemaValues(client, config, configPath, opts);
-      io.stdout.write(`${JSON.stringify(result)}\n`);
-      return 0;
-    }
     if (command === "init") {
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
       const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
@@ -101,7 +90,7 @@ export async function run(
           client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema),
         ]);
       if (existing && (existing.schemaHash !== canonical || existing.indexSchemaHash !== indexCanonical)) {
-        throw new Error("The installed schema identities differ from this config. Review the data conversion before setup. The config stays unchanged.");
+        throw new Error("The installed schema identities differ from this config. The config stays unchanged.");
       }
       writeConfig(
         {
@@ -432,8 +421,6 @@ type Options = {
   schema?: string;
   fields: string[];
   apply?: boolean;
-  maintenance?: boolean;
-  abort?: boolean;
   log?: string;
 };
 
@@ -449,8 +436,6 @@ function parseOptions(args: string[]): Options {
       opts.apply = true;
       continue;
     }
-    if (arg === "--maintenance") { opts.maintenance = true; continue; }
-    if (arg === "--abort") { opts.abort = true; continue; }
     if (!arg.startsWith("--")) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
     const value = args[++i];
@@ -504,7 +489,6 @@ function usage(): string {
   return [
     "usage: lastsecrets init [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets publish [--config PATH] [--node-url URL] [--socket PATH]",
-    "       lastsecrets schema-values-convert [--config PATH] [--apply --maintenance] [--abort]",
     "       lastsecrets schema-json",
     "       lastsecrets vocabulary-json",
     "       lastsecrets put <slug> --label TEXT --provider TEXT --purpose TEXT --env TEXT --value-stdin",
@@ -519,7 +503,6 @@ function usage(): string {
     "",
     "init     — declare schema-owned values through Mini and pin definition identities.",
     "publish  — add distribution governance and verify Schema Service identities.",
-    "schema-values-convert — show the conversion plan; pause requests only with --apply --maintenance.",
     "admin-slice — emit metadata-only JSON for the admin delivery path.",
     "delete   — delete exact local slugs and repair metadata; emit a value-free JSON receipt.",
   ].join("\n");

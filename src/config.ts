@@ -54,27 +54,16 @@ export function readConfig(path = defaultConfigPath()): Config {
   return assertConfigShape(path, parsed);
 }
 
-export function configBytes(config: Config): string {
+function configBytes(config: Config): string {
   const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered)
     : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
       .sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, ordered(item)])) : value;
   return JSON.stringify(ordered(config), null, 2) + "\n";
 }
 
-export function writeConfig(config: Config, path = defaultConfigPath(), expected?: string | null,
-  conversionScope?: string): void {
+export function writeConfig(config: Config, path = defaultConfigPath()): void {
   const parent = dirname(path);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const check = () => {
-    if (expected !== undefined && (existsSync(path) ? readFileSync(path, "utf8") : null) !== expected) {
-      throw new ConfigError("config_changed", "The config changed during the schema operation.");
-    }
-    const scope = path + ".conversion.json";
-    if (existsSync(scope) && readFileSync(scope, "utf8") !== conversionScope) {
-      throw new ConfigError("conversion_active", "Resume the saved app conversion before a config change.");
-    }
-  };
-  check();
   const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`);
   const file = openSync(temporary, "wx", 0o600);
   try {
@@ -82,7 +71,6 @@ export function writeConfig(config: Config, path = defaultConfigPath(), expected
       writeFileSync(file, configBytes(config), "utf8");
       fsyncSync(file);
     } finally { closeSync(file); }
-    check();
     renameSync(temporary, path);
     const directory = openSync(parent, "r");
     try { fsyncSync(directory); } finally { closeSync(directory); }
