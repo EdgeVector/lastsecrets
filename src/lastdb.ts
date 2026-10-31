@@ -258,13 +258,15 @@ export function newLastDbClient(opts: {
   let canonicalMode: boolean | undefined = opts.canonicalVocabulary === "auto"
     ? undefined : opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
   let vocabularyReadiness: Promise<boolean> | undefined;
+  // Set by the readiness check that runs before each declaration.
+  let nodeApiVersion = 0;
   const useCanonicalVocabulary = (): Promise<boolean> => {
     return vocabularyReadiness ??= (async () => {
       const [catalog, version] = await Promise.all([
         callJson("/api/schemas", "GET").then(unwrapData), callJson("/api/version", "GET").then(unwrapData),
       ]);
       if (!Array.isArray(catalog.schemas)) throw new LastSecretsError("schema_catalog_invalid", "Cannot confirm the local schema format before declaration.");
-      requireOwnedSchemas(catalog.schemas, version);
+      nodeApiVersion = requireOwnedSchemas(catalog.schemas, version);
       const legacy = catalog.schemas.some((value) => {
         if (!value || typeof value !== "object") return false;
         const schema = value as Record<string, unknown>;
@@ -297,7 +299,7 @@ export function newLastDbClient(opts: {
       if (canonicalMode) schema = canonicalSchema(schema);
       schema = {...schema, independent_fields: true};
       const body = await callJson("/api/schemas/declare", "POST", {namespace:appId, schema});
-      const {identity, runtime} = ownedDeclaration(body, `${appId}/${schema.name}`);
+      const {identity, runtime} = ownedDeclaration(body, `${appId}/${schema.name}`, nodeApiVersion);
       if (canonicalMode) Object.assign(fieldProfiles, profilesFor(local, [identity, runtime]));
       return {canonical:identity, schemaName:runtime};
     },

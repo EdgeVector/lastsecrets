@@ -1,5 +1,25 @@
 export const OWNER_APP_ID = "lastsecrets";
 
+// LastDB API 13 (lastdb #803) is the first node that refuses a home with the
+// retired shared-value layout at startup. Every schema such a node lists owns
+// its values, so its replies may omit the per-schema `independent_fields` key
+// (lastdb removes it in stage 2 of the protein removal). An explicit `false`
+// still means "not owned", and an older node must still send `true`.
+export const OWNED_HOME_API_VERSION = 13;
+
+/** Whether a node reply's `independent_fields` value confirms owned values. */
+export const ownsValues = (independentFields: unknown, apiVersion: number): boolean =>
+  independentFields === true ||
+  (independentFields === undefined && apiVersion >= OWNED_HOME_API_VERSION);
+
+/** `api_version` from a `GET /api/version` reply (bare or in a `data` envelope); 0 when absent. */
+export function apiVersionOf(reply: unknown): number {
+  const isObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  const body = isObject(reply) && isObject(reply.data) ? reply.data : reply;
+  return isObject(body) && typeof body.api_version === "number" ? body.api_version : 0;
+}
+
 export type FieldType =
   | "String"
   | "DateTime"
