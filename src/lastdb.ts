@@ -88,6 +88,16 @@ export type LastDbClient = {
     keyHash: string;
     fields: string[];
   }): Promise<QueryRow | null>;
+  /**
+   * Exact HashKey reads of one schema through `/api/queries/batch`, in key
+   * order (null for an absent key). Any item the node does not confirm fails
+   * the whole call: an unread row must never look like an absent row.
+   */
+  queryByKeys(opts: {
+    schemaHash: string;
+    keys: readonly string[];
+    fields: string[];
+  }): Promise<(QueryRow | null)[]>;
   queryAll(opts: {
     schemaHash: string;
     fields: string[];
@@ -112,6 +122,8 @@ type FetchInit = RequestInit & { unix?: string };
 type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 
 const QUERY_PAGE_SIZE = 1000;
+/** The native `/api/queries/batch` limit. */
+const BATCH_READ_LIMIT = 64;
 const SOCKET_FILE_NAME = "folddb.sock";
 // Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback *marker*
 // (hostname only) so clients select socket transport via isLoopbackNodeUrl —
@@ -202,6 +214,56 @@ export function newLastDbClient(opts: {
     } catch (err) {
       throw mapSdkError(err, nodeUrl, socketPath);
     }
+  };
+
+  // The SDK has no batch read. The field-alias transport maps each query item.
+  const readKeyBatch = async (
+    schemaHash: string,
+    keys: string[],
+    fields: string[],
+  ): Promise<(QueryRow | null)[]> => {
+    const body = {
+      queries: keys.map((key) => ({
+        schema_name: schemaHash, fields, filter: { HashKey: key }, limit: 2, offset: 0,
+      })),
+    };
+    let response;
+    try {
+      response = await withTimeout(sdkTransport.send("POST", "/api/queries/batch", { body }), queryTimeoutMs);
+    } catch (err) {
+      if (err instanceof LastSecretsError) throw err;
+      throw mapSdkError(err, nodeUrl, socketPath);
+    }
+    if (response.status !== 200) {
+      throw new LastSecretsError(
+        `node_http_${response.status}`,
+        `LastDB POST /api/queries/batch returned HTTP ${response.status}${safeBodyMessage(response.body)}`,
+      );
+    }
+    const reply = asObject(response.body);
+    if (!reply || !Array.isArray(reply.results) || reply.results.length !== keys.length) {
+      throw new LastSecretsError("batch_read_ambiguous", "LastDB returned an incomplete batch read.");
+    }
+    return reply.results.map((item, position) => {
+      const key = keys[position]!;
+      const envelope = asObject(item);
+      const page = asObject(envelope?.response);
+      // A Hash key names at most one record. An unresolved row is an unread
+      // row, not an absent one.
+      if (envelope?.status !== 200 || !page || page.ok === false || !Array.isArray(page.results) ||
+          page.results.length > 1 || page.has_more === true ||
+          (typeof page.unresolved_rows === "number" && page.unresolved_rows !== 0)) {
+        throw new LastSecretsError("batch_read_ambiguous", `LastDB did not confirm the read of key ${key}.`);
+      }
+      if (page.results.length === 0) return null;
+      const row = asObject(page.results[0]);
+      const rowKey = asObject(row?.key);
+      const rowFields = asObject(row?.fields);
+      if (!rowFields || rowKey?.hash !== key) {
+        throw new LastSecretsError("batch_read_ambiguous", `LastDB returned another record for key ${key}.`);
+      }
+      return { fields: rowFields, key: { hash: key, range: null } };
+    });
   };
 
   // Owner setup still uses node-specific endpoints that the app data SDK does
@@ -386,6 +448,14 @@ export function newLastDbClient(opts: {
       const rows = result.rows.map(sdkRowToQueryRow);
       return rows.find((row) => row.key.hash === keyHash) ?? null;
     },
+    async queryByKeys({ schemaHash, keys, fields }) {
+      const chunks: string[][] = [];
+      for (let start = 0; start < keys.length; start += BATCH_READ_LIMIT) {
+        chunks.push(keys.slice(start, start + BATCH_READ_LIMIT));
+      }
+      const replies = await Promise.all(chunks.map((chunk) => readKeyBatch(schemaHash, chunk, fields)));
+      return replies.flat();
+    },
     async queryAll({ schemaHash, fields, allowFullScan }) {
       const result = await sdkDataPath((client) =>
         client.queryAll(
@@ -484,6 +554,12 @@ function objectString(value: unknown, key: string): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function unwrapData(body: unknown): Record<string, unknown> {

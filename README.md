@@ -68,6 +68,24 @@ lastsecrets ref schema-r2-dev
 
 `lastsecrets list` and `lastsecrets search <term>` return metadata only and always print `value=<redacted>`.
 
+### Metadata index rows
+
+The `LastSecretIndex` schema keeps the metadata list in 33 rows of one schema, key, and field (`src/index-rows.ts`):
+
+- `__all__` is the root row. An earlier release kept every entry there.
+- `__bucket_00__` to `__bucket_31__` are the bucket rows. The first byte of sha256(slug), modulo 32, selects the bucket of a slug.
+
+A format 7 home refuses a record above 64 KiB, with all fields and stamps. One row for every secret reaches that cap at a few hundred secrets.
+
+- `list`, `search`, and `admin-slice` read the 33 rows in one batch read by key. A bucket entry wins over a root entry for the same slug.
+- `put` reads the root row and the bucket row with the secret. It writes the entry to the bucket row. Then it removes the entry from the root row if the root row holds it.
+- `put` refuses before any write when the bucket `payload_json`, as stored in the record, would be above 48 KiB (49,152 bytes). A bucket holds about 130 entries at that size.
+- New entries never go into the root row. The root row only becomes smaller.
+
+An existing home needs no conversion. A home with all entries in `__all__` is a valid state of these rows.
+
+CAUTION: The description of the index key field still says that `__all__` names the complete local list. Only a new schema publication can change that text. The root row is the complete list only on a home that this release has not written.
+
 Delete one or more exact local slugs after their task ends:
 
 ```sh
@@ -84,19 +102,21 @@ It reads fixed metadata fields only. It never reads or prints a secret value.
 Each read collects all selected keys and sends two independent native batches in parallel.
 The normal keyed query and the owner-only selected conflict API use the same ordered selections.
 A known query flag keeps the current conflict checks. A verified empty query keeps the current absent result.
-A present query with unknown flags requires complete clean selected field-molecule metadata.
-Each present field must name the same molecule in both responses.
+A present query with unknown flags requires a complete clean selected conflict result.
+On a format 6 home, the result has the `selected_field_molecules` scope. Each present field must name the same molecule in both responses.
+On a format 7 home, the result has the `selected_record_fields` scope. It names no molecules. Each selected field must be clean with no kept losing value, and the query metadata must name no molecule.
 A missing, incompatible, malformed, incomplete, unknown, or conflicted selected result stops that path before a mutation.
 The selected result covers the complete field molecule. An unrelated key conflict also prevents clean.
 The command does not infer conflict keys from legacy display strings or change the normal query flags.
 It sends one native Delete batch for every named key, even when its metadata projection is empty.
 These deletes have no version condition.
 
-The command then reads the named keys and the metadata rollup again.
-It removes rollup entries only for acknowledged slugs whose metadata remains absent.
-It compares the exact previous rollup payload before the metadata write.
+The command then reads the named keys and the metadata index rows again.
+It reads the root row and the bucket row of each named slug. It refuses a bucket row that holds a slug of another bucket.
+It removes index entries only for acknowledged slugs whose metadata remains absent.
+It sends one update for each changed row. Each update compares the exact previous payload of that row.
 It keeps the content and order of every unrelated entry.
-It sends no rollup write when the rollup or the relevant entries are absent.
+It sends no index write when the rows or the relevant entries are absent.
 A final batch read observes the named keys and their metadata entries.
 
 CAUTION: The Delete batch and the metadata repair are separate requests.
@@ -239,16 +259,20 @@ An existing home moves to this release only by the home copy (EdgeVector/last-st
 3. This release initializes the new home with `lastsecrets init`.
 4. The old home stays unchanged as the recovery point.
 
+CAUTION: A format 7 home refuses a record above 64 KiB. An earlier release adds every new entry to `__all__`. Use this release for each new secret before a copy to a format 7 home. This release adds no entry to `__all__`.
+
 A primary change requires Tom's authorization.
 
 ## CI comparison
 
 The CI latency comparison uses the actual CLI and two exact daemon revisions.
-The main app runs on the compatible daemon. This app runs on the removal daemon.
+The main app runs on the compatible format 6 daemon. This app runs on a format 7 daemon from lastdb main.
 Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.
 Every operation retains 64 calls per arm.
-Complete values, metadata membership, current atoms, deletion, repeat setup, and reopen remain required.
+Complete values, metadata membership, deletion, repeat setup, and reopen remain required.
+A format 6 home also keeps its atom identities. A format 7 home has no atom identity, so its field metadata has an empty `atom_uuid`.
+Before the timed updates of this app, 12 metadata entries move to the root row. The updates and the delete must remove them from the root row.
 Latency includes the CLI process and all requests; it does not isolate database latency.
 
 Each timed call retains child CPU time and bounded daemon and host counter observations.

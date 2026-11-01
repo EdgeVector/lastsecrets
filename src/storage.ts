@@ -1,10 +1,11 @@
 import { readConfig, type Config } from "./config.ts";
-import { type LastDbClient, type QueryRow, redactKnownSecretWords } from "./lastdb.ts";
+import { LastSecretsError, type LastDbClient, type QueryRow, redactKnownSecretWords } from "./lastdb.ts";
 import { ALL_SECRETS_INDEX_KEY, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
+import { INDEX_ROW_KEYS, INDEX_ROW_MAX_BYTES, indexBucketKey, storedPayloadBytes } from "./index-rows.ts";
 
 import {
   DeleteError, absentSlugs, deleteProgress, deleteReads, deleteReceipt,
-  deleteApiVersion, resolveDeleteSchemas, rollupAbsentSlugs, rollupRepair, strictRollup, validateDeleteSlugs,
+  deleteApiVersion, resolveDeleteSchemas, rollupAbsentSlugs, rollupRepairs, strictRollups, validateDeleteSlugs,
 } from "./batch.ts";
 
 export type SecretInput = {
@@ -67,7 +68,7 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
     const reads = deleteReads(schemas, slugs);
     const before = await client.nativeBatch.readKeys(reads);
     absentSlugs(before, slugs);
-    strictRollup(before[slugs.length]!);
+    strictRollups(before, slugs);
     // An uncertain request stops this sequence. Never retry a mutation here.
     progress.delete_outcome = "unknown";
     await client.nativeBatch.mutate(slugs.map((slug) => ({
@@ -79,18 +80,19 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
     const fresh = await client.nativeBatch.readKeys(reads);
     const absent = absentSlugs(fresh, slugs);
     progress.metadata_absent_refs = absent.map(secretRef);
-    const repair = rollupRepair(schemas.index, strictRollup(fresh[slugs.length]!), absent);
-    if (repair) {
+    // One value-conditioned update for each index row that holds a removable entry.
+    const repairs = rollupRepairs(schemas.index, strictRollups(fresh, slugs), absent);
+    if (repairs.length > 0) {
       progress.metadata_cleanup = "unknown";
-      await client.nativeBatch.mutate([repair]);
+      await client.nativeBatch.mutate(repairs);
       progress.metadata_cleanup = "acknowledged";
     } else {
-      // Never delete or create the whole rollup to repair an absent entry.
+      // Never delete or create an index row to repair an absent entry.
       progress.metadata_cleanup = "not_needed";
     }
     const after = await client.nativeBatch.readKeys(reads);
     progress.metadata_absent_refs = absentSlugs(after, slugs).map(secretRef);
-    progress.rollup_absent_refs = rollupAbsentSlugs(strictRollup(after[slugs.length]!), slugs).map(secretRef);
+    progress.rollup_absent_refs = rollupAbsentSlugs(strictRollups(after, slugs), slugs).map(secretRef);
     progress.post_read = "completed";
     const complete = progress.metadata_absent_refs.length === slugs.length && progress.rollup_absent_refs.length === slugs.length;
     return deleteReceipt(progress, complete ? "complete" : "post_read_incomplete");
@@ -106,13 +108,35 @@ export async function putSecret(
   input: SecretInput,
 ): Promise<SecretMetadata> {
   validateSecretInput(input);
-  const existing = await client.queryByKey({
-    schemaHash: schemaId(config),
-    keyHash: input.slug,
-    fields: SECRET_FIELDS,
-  });
+  const indexHash = indexSchemaId(config);
+  const bucket = indexBucketKey(input.slug);
+  // The two index rows that can hold this slug are read with the secret, so a
+  // full bucket refuses the put before any write.
+  const [existing, [root, row]] = await Promise.all([
+    client.queryByKey({
+      schemaHash: schemaId(config),
+      keyHash: input.slug,
+      fields: SECRET_FIELDS,
+    }),
+    client.queryByKeys({
+      schemaHash: indexHash,
+      keys: [ALL_SECRETS_INDEX_KEY, bucket],
+      fields: INDEX_FIELDS,
+    }),
+  ]);
   const now = new Date().toISOString();
   const createdAt = existing ? rowToSecret(existing).createdAt : now;
+  const meta = toMetadata({
+    slug: input.slug,
+    label: input.label,
+    provider: input.provider,
+    purpose: input.purpose,
+    environment: input.environment,
+    secretValue: input.value,
+    createdAt,
+    updatedAt: now,
+  });
+  const patch = planIndexPatch(bucket, root ?? null, row ?? null, meta);
   const fields = {
     slug: input.slug,
     label: input.label,
@@ -134,17 +158,7 @@ export async function putSecret(
     throw redactError(err, input.value);
   }
 
-  const meta = toMetadata({
-    slug: input.slug,
-    label: input.label,
-    provider: input.provider,
-    purpose: input.purpose,
-    environment: input.environment,
-    secretValue: input.value,
-    createdAt,
-    updatedAt: now,
-  });
-  await patchIndex(client, config, meta);
+  await writeIndexPatch(client, indexHash, patch, now);
   return meta;
 }
 
@@ -176,12 +190,18 @@ export async function listSecrets(
   client: LastDbClient,
   config: Pick<Config, "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases">,
 ): Promise<SecretMetadata[]> {
-  const row = await client.queryByKey({
+  // One batch read of every index row. A later row wins for a slug, so a
+  // bucket entry wins over a root entry (see index-rows.ts).
+  const rows = await client.queryByKeys({
     schemaHash: indexSchemaId(config),
-    keyHash: ALL_SECRETS_INDEX_KEY,
+    keys: INDEX_ROW_KEYS,
     fields: INDEX_FIELDS,
   });
-  return parseIndexEntries(row).sort((a, b) => a.slug.localeCompare(b.slug));
+  const bySlug = new Map<string, SecretMetadata>();
+  for (const row of rows) {
+    for (const entry of parseIndexEntries(row)) bySlug.set(entry.slug, entry);
+  }
+  return [...bySlug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 export async function searchSecrets(
@@ -318,42 +338,91 @@ function indexSchemaId(config: Pick<Config, "indexSchemaHash" | "indexSchemaName
   return id;
 }
 
-async function patchIndex(
-  client: LastDbClient,
-  config: Pick<Config, "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases">,
+type IndexPatch = {
+  bucket: string;
+  bucketExists: boolean;
+  bucketPayload: string;
+  /** The root payload without this slug, or null when the root row does not hold it. */
+  rootPayload: string | null;
+};
+
+/**
+ * The index writes of one put: the slug's entry goes to its bucket row, and
+ * leaves the root row if the root row holds it. Other items stay byte-for-byte
+ * as parsed. An unreadable bucket payload is rebuilt (as the single row was
+ * before buckets); an unreadable root payload is never rewritten.
+ */
+function planIndexPatch(
+  bucket: string,
+  root: QueryRow | null,
+  row: QueryRow | null,
   meta: SecretMetadata,
-): Promise<void> {
-  const indexHash = indexSchemaId(config);
-  const row = await client.queryByKey({
-    schemaHash: indexHash,
-    keyHash: ALL_SECRETS_INDEX_KEY,
-    fields: INDEX_FIELDS,
-  });
-  const entries = parseIndexEntries(row).filter((e) => e.slug !== meta.slug);
-  entries.push(meta);
-  entries.sort((a, b) => a.slug.localeCompare(b.slug));
-  const fields = {
-    key: ALL_SECRETS_INDEX_KEY,
-    payload_json: JSON.stringify(entries),
-    updated_at: new Date().toISOString(),
+): IndexPatch {
+  const items = (payloadItems(row) ?? []).filter((item) => itemSlug(item) !== meta.slug);
+  items.push(meta);
+  items.sort((a, b) => itemSlug(a).localeCompare(itemSlug(b)));
+  const bucketPayload = JSON.stringify(items);
+  const bytes = storedPayloadBytes(bucketPayload);
+  if (bytes > INDEX_ROW_MAX_BYTES) {
+    throw new LastSecretsError(
+      "index_row_full",
+      `The LastSecrets index row ${bucket} would hold ${bytes} bytes; the cap is ${INDEX_ROW_MAX_BYTES} bytes. Nothing was written.`,
+    );
+  }
+  const rootItems = payloadItems(root);
+  const rootKept = rootItems?.filter((item) => itemSlug(item) !== meta.slug);
+  return {
+    bucket,
+    bucketExists: row !== null,
+    bucketPayload,
+    rootPayload: rootItems && rootKept && rootKept.length !== rootItems.length ? JSON.stringify(rootKept) : null,
   };
-  if (row) {
-    await client.updateRecord({ schemaHash: indexHash, keyHash: ALL_SECRETS_INDEX_KEY, fields });
+}
+
+async function writeIndexPatch(
+  client: LastDbClient,
+  indexHash: string,
+  patch: IndexPatch,
+  now: string,
+): Promise<void> {
+  const fields = { key: patch.bucket, payload_json: patch.bucketPayload, updated_at: now };
+  if (patch.bucketExists) {
+    await client.updateRecord({ schemaHash: indexHash, keyHash: patch.bucket, fields });
   } else {
-    await client.createRecord({ schemaHash: indexHash, keyHash: ALL_SECRETS_INDEX_KEY, fields });
+    await client.createRecord({ schemaHash: indexHash, keyHash: patch.bucket, fields });
+  }
+  // Remove the root entry only after the bucket write. A failure between the
+  // two writes leaves the entry in both rows (readers take the bucket entry),
+  // never in neither.
+  if (patch.rootPayload !== null) {
+    await client.updateRecord({
+      schemaHash: indexHash,
+      keyHash: ALL_SECRETS_INDEX_KEY,
+      fields: { key: ALL_SECRETS_INDEX_KEY, payload_json: patch.rootPayload, updated_at: now },
+    });
   }
 }
 
-function parseIndexEntries(row: QueryRow | null): SecretMetadata[] {
+/** The parsed payload_json array of an index row; null when the row is absent or unreadable. */
+function payloadItems(row: QueryRow | null): unknown[] | null {
   const raw = row?.fields?.payload_json;
-  if (typeof raw !== "string" || raw.length === 0) return [];
-  let parsed: unknown;
+  if (typeof raw !== "string" || raw.length === 0) return null;
   try {
-    parsed = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
   } catch {
-    return [];
+    return null;
   }
-  return Array.isArray(parsed) ? parsed.filter(isSecretMetadata) : [];
+}
+
+function itemSlug(item: unknown): string {
+  if (typeof item !== "object" || item === null) return "";
+  const slug = (item as Record<string, unknown>).slug;
+  return typeof slug === "string" ? slug : "";
+}
+
+function parseIndexEntries(row: QueryRow | null): SecretMetadata[] {
+  return (payloadItems(row) ?? []).filter(isSecretMetadata);
 }
 
 function isSecretMetadata(value: unknown): value is SecretMetadata {
