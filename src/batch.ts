@@ -5,15 +5,26 @@ import type { QueryRow } from "./lastdb.ts";
 import {
   ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, apiVersionOf, lastSecretIndexSchema, lastSecretSchema, ownsValues, secretRef,
 } from "./schema.ts";
+import { INDEX_BUCKET_COUNT, indexBucketKey } from "./index-rows.ts";
 
 export const DELETE_METADATA_FIELDS = lastSecretSchema.schema.fields.filter(
   (field) => field !== "secret_value",
 );
-export const DELETE_SLUG_LIMIT = 63; // One rollup read plus these keys fits the native 64-query limit.
+export const DELETE_SLUG_LIMIT = 63;
+/** The native limit of one `/api/queries/batch` and one `/api/conflicts/keys` request. */
+const NATIVE_KEY_LIMIT = 64;
+/** The slugs, the root index row and at most one bucket row per slug. */
+const DELETE_READ_LIMIT = DELETE_SLUG_LIMIT + 1 + INDEX_BUCKET_COUNT;
 type ObjectRecord = Record<string, unknown>;
 export type ExactRead = { schema: string; key: string; fields: string[] };
 type ConflictState = "clean" | "conflict" | "unknown";
 type SelectedConflict = {
+  /**
+   * `selected_record_fields` (a format 7 home): fields in request order with
+   * their kept losing values, and no molecule IDs. Otherwise
+   * `selected_field_molecules` (format 6): one molecule ID for each field.
+   */
+  records: boolean;
   state: ConflictState;
   fields: { molecule_uuid: string | null; state: ConflictState }[];
 };
@@ -85,27 +96,35 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
     if (parsed.ok !== true) throw new DeleteError("reply_not_acknowledged");
     return parsed;
   };
+  const readChunk = async (reads: ExactRead[]): Promise<(QueryRow | null)[]> => {
+    // Independent bounded reads share the normal owner transport. An absent
+    // endpoint never proves clean; known query flags retain their old path.
+    const [reply, selected] = await Promise.all([
+      send("POST", "/api/queries/batch", {
+        queries: reads.map((read) => ({
+          schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
+        })),
+      }),
+      send("POST", "/api/conflicts/keys", {
+        keys: reads.map((read) => ({ schema_name: read.schema, fields: read.fields, hash: read.key })),
+      }).then((reply) => parseSelectedConflicts(reply, reads)).catch(() => null),
+    ]);
+    if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
+      throw new DeleteError("read_batch_reply_ambiguous");
+    }
+    return reply.results.map((item, position) => parseExactRead(item, reads[position]!, selected?.[position]));
+  };
   return {
     async schemas() { return send("GET", "/api/schemas"); },
     async version() { return send("GET", "/api/version"); },
     async readKeys(reads) {
-      if (reads.length < 1 || reads.length > 64) throw new DeleteError("invalid_read_count");
-      // Independent bounded reads share the normal owner transport. An absent
-      // endpoint never proves clean; known query flags retain their old path.
-      const [reply, selected] = await Promise.all([
-        send("POST", "/api/queries/batch", {
-          queries: reads.map((read) => ({
-            schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
-          })),
-        }),
-        send("POST", "/api/conflicts/keys", {
-          keys: reads.map((read) => ({ schema_name: read.schema, fields: read.fields, hash: read.key })),
-        }).then((reply) => parseSelectedConflicts(reply, reads)).catch(() => null),
-      ]);
-      if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
-        throw new DeleteError("read_batch_reply_ambiguous");
+      if (reads.length < 1 || reads.length > DELETE_READ_LIMIT) throw new DeleteError("invalid_read_count");
+      // Each chunk fits the native per-request limit. Chunks run in parallel.
+      const chunks: ExactRead[][] = [];
+      for (let start = 0; start < reads.length; start += NATIVE_KEY_LIMIT) {
+        chunks.push(reads.slice(start, start + NATIVE_KEY_LIMIT));
       }
-      return reply.results.map((item, position) => parseExactRead(item, reads[position]!, selected?.[position]));
+      return (await Promise.all(chunks.map(readChunk))).flat();
     },
     async mutate(mutations) {
       const reply = await send("POST", "/api/mutations/batch", { mutations });
@@ -164,8 +183,16 @@ function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConfl
     if (flag !== undefined && flag !== false && !(unknown && flag === "unknown")) {
       throw new DeleteError("key_conflict_state_ambiguous");
     }
-    if (unknown && (!validMoleculeIdentity(info.molecule_uuid) ||
-        info.molecule_uuid !== selected!.fields[position]!.molecule_uuid)) {
+    if (!unknown) continue;
+    if (selected!.records) {
+      // A format 7 home has records, not molecules: its query metadata names
+      // no molecule (atom_uuid is ""). A molecule ID here means the query and
+      // the selected reply describe different home formats.
+      if (info.molecule_uuid !== undefined && info.molecule_uuid !== null) {
+        throw new DeleteError("key_conflict_molecule_mismatch");
+      }
+    } else if (!validMoleculeIdentity(info.molecule_uuid) ||
+        info.molecule_uuid !== selected!.fields[position]!.molecule_uuid) {
       throw new DeleteError("key_conflict_molecule_mismatch");
     }
   }
@@ -173,7 +200,8 @@ function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConfl
 }
 
 function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): SelectedConflict[] {
-  if (reply.version !== 1 || reply.scope !== "selected_field_molecules" || reply.count !== reads.length ||
+  const records = reply.scope === "selected_record_fields";
+  if (reply.version !== 1 || !(records || reply.scope === "selected_field_molecules") || reply.count !== reads.length ||
       !Array.isArray(reply.results) || reply.results.length !== reads.length) {
     throw new DeleteError("selected_conflict_reply_ambiguous");
   }
@@ -181,19 +209,35 @@ function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): Select
     const result = object(value);
     if (!validConflictState(result.state) || !Array.isArray(result.fields) ||
         result.fields.length !== reads[position]!.fields.length) throw new DeleteError("selected_conflict_reply_ambiguous");
-    const fields = result.fields.map((value) => {
-      const field = object(value);
-      if (!validConflictState(field.state) ||
-          !(validMoleculeIdentity(field.molecule_uuid) || (field.molecule_uuid === null && field.state === "unknown"))) {
-        throw new DeleteError("selected_conflict_reply_ambiguous");
-      }
-      return { molecule_uuid: field.molecule_uuid as string | null, state: field.state };
-    });
+    const fields = result.fields.map((value) => records ? selectedRecordField(value) : selectedMoleculeField(value));
     const combined = fields.some((field) => field.state === "unknown") ? "unknown" :
       fields.some((field) => field.state === "conflict") ? "conflict" : "clean";
     if (result.state !== combined) throw new DeleteError("selected_conflict_reply_ambiguous");
-    return { state: result.state, fields };
+    return { records, state: result.state, fields };
   });
+}
+/** Format 6: each selected field names its molecule; an unknown field may name none. */
+function selectedMoleculeField(value: unknown): SelectedConflict["fields"][number] {
+  const field = object(value);
+  if (!validConflictState(field.state) ||
+      !(validMoleculeIdentity(field.molecule_uuid) || (field.molecule_uuid === null && field.state === "unknown"))) {
+    throw new DeleteError("selected_conflict_reply_ambiguous");
+  }
+  return { molecule_uuid: field.molecule_uuid as string | null, state: field.state };
+}
+/**
+ * Format 7: one entry per selected field, in request order, with the node's
+ * field name and its kept losing values. Only a field with kept values is in
+ * conflict. The values are never retained.
+ */
+function selectedRecordField(value: unknown): SelectedConflict["fields"][number] {
+  const field = object(value);
+  if (typeof field.field !== "string" || field.field.length === 0 || !validConflictState(field.state) ||
+      !Array.isArray(field.conflicts) || (field.state === "conflict") !== (field.conflicts.length > 0) ||
+      field.molecule_uuid !== undefined) {
+    throw new DeleteError("selected_conflict_reply_ambiguous");
+  }
+  return { molecule_uuid: null, state: field.state };
 }
 function validConflictState(value: unknown): value is ConflictState {
   return value === "clean" || value === "conflict" || value === "unknown";
@@ -260,14 +304,18 @@ function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.s
   }
   return route;
 }
+/** The index rows that can hold an entry of these slugs: the root row, then each bucket row once. */
+export function deleteIndexKeys(slugs: string[]): string[] {
+  return [ALL_SECRETS_INDEX_KEY, ...[...new Set(slugs.map(indexBucketKey))].sort()];
+}
 export function deleteReads(schemas: { secret: string; index: string }, slugs: string[]): ExactRead[] {
   return [
     ...slugs.map((key) => ({ schema: schemas.secret, key, fields: DELETE_METADATA_FIELDS })),
-    { schema: schemas.index, key: ALL_SECRETS_INDEX_KEY, fields: lastSecretIndexSchema.schema.fields },
+    ...deleteIndexKeys(slugs).map((key) => ({ schema: schemas.index, key, fields: lastSecretIndexSchema.schema.fields })),
   ];
 }
 export function absentSlugs(rows: (QueryRow | null)[], slugs: string[]): string[] {
-  if (rows.length !== slugs.length + 1) throw new DeleteError("metadata_batch_ambiguous");
+  if (rows.length !== slugs.length + deleteIndexKeys(slugs).length) throw new DeleteError("metadata_batch_ambiguous");
   return slugs.filter((slug, position) => {
     const row = rows[position];
     if (!row) return true;
@@ -279,9 +327,17 @@ export function absentSlugs(rows: (QueryRow | null)[], slugs: string[]): string[
   });
 }
 const METADATA_ENTRY_FIELDS = ["slug", "ref", "label", "provider", "purpose", "environment", "createdAt", "updatedAt"];
-export function strictRollup(row: QueryRow | null): { payload: string; entries: ObjectRecord[] } | null {
+type Rollup = { key: string; payload: string; entries: ObjectRecord[] };
+/** The index rows of {@link deleteReads}, in {@link deleteIndexKeys} order. An absent row is null. */
+export function strictRollups(rows: (QueryRow | null)[], slugs: string[]): (Rollup | null)[] {
+  const keys = deleteIndexKeys(slugs);
+  const indexRows = rows.slice(slugs.length);
+  if (indexRows.length !== keys.length) throw new DeleteError("metadata_batch_ambiguous");
+  return indexRows.map((row, position) => strictRollup(row, keys[position]!));
+}
+function strictRollup(row: QueryRow | null, key: string): Rollup | null {
   if (!row) return null;
-  if (row.fields.key !== ALL_SECRETS_INDEX_KEY || typeof row.fields.payload_json !== "string" || !validTime(row.fields.updated_at)) {
+  if (row.fields.key !== key || typeof row.fields.payload_json !== "string" || !validTime(row.fields.updated_at)) {
     throw new DeleteError("rollup_metadata_ambiguous");
   }
   let parsed: unknown;
@@ -294,28 +350,35 @@ export function strictRollup(row: QueryRow | null): { payload: string; entries: 
         METADATA_ENTRY_FIELDS.some((field) => typeof entry[field] !== "string" || !entry[field]) ||
         !validTime(entry.createdAt) || !validTime(entry.updatedAt)) throw new DeleteError("rollup_entry_invalid");
     const slug = entry.slug as string;
-    if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug) || entry.ref !== `lastsecrets://${slug}` || seen.has(slug)) {
+    // A bucket row holds only its own slugs, so the rows read here are the
+    // only rows that can hold a named slug. The root row can hold any slug.
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(slug) || entry.ref !== `lastsecrets://${slug}` || seen.has(slug) ||
+        (key !== ALL_SECRETS_INDEX_KEY && indexBucketKey(slug) !== key)) {
       throw new DeleteError("rollup_entry_identity_ambiguous");
     }
     seen.add(slug);
     return entry;
   });
-  return { payload: row.fields.payload_json, entries };
+  return { key, payload: row.fields.payload_json, entries };
 }
 function validTime(value: unknown): boolean {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value));
 }
-export function rollupRepair(schema: string, rollup: ReturnType<typeof strictRollup>, absent: string[]): BatchMutation | null {
-  if (!rollup) return null;
+/** One update per changed index row, each conditioned on the exact previous payload. */
+export function rollupRepairs(schema: string, rollups: (Rollup | null)[], absent: string[]): BatchMutation[] {
   const removable = new Set(absent);
-  const kept = rollup.entries.filter((entry) => !removable.has(entry.slug as string));
-  if (kept.length === rollup.entries.length) return null;
-  return {
-    type: "mutation", schema, mutation_type: "update", key_value: { hash: ALL_SECRETS_INDEX_KEY, range: null },
-    fields_and_values: { payload_json: JSON.stringify(kept), updated_at: new Date().toISOString() },
-    expected: { type: "value", field: "payload_json", value: rollup.payload },
-  };
+  const updatedAt = new Date().toISOString();
+  return rollups.flatMap((rollup): BatchMutation[] => {
+    if (!rollup) return [];
+    const kept = rollup.entries.filter((entry) => !removable.has(entry.slug as string));
+    if (kept.length === rollup.entries.length) return [];
+    return [{
+      type: "mutation", schema, mutation_type: "update", key_value: { hash: rollup.key, range: null },
+      fields_and_values: { payload_json: JSON.stringify(kept), updated_at: updatedAt },
+      expected: { type: "value", field: "payload_json", value: rollup.payload },
+    }];
+  });
 }
-export function rollupAbsentSlugs(rollup: ReturnType<typeof strictRollup>, slugs: string[]): string[] {
-  return slugs.filter((slug) => !rollup?.entries.some((entry) => entry.slug === slug));
+export function rollupAbsentSlugs(rollups: (Rollup | null)[], slugs: string[]): string[] {
+  return slugs.filter((slug) => !rollups.some((rollup) => rollup?.entries.some((entry) => entry.slug === slug)));
 }

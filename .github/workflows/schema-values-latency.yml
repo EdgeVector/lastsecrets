@@ -15,7 +15,8 @@ env:
   APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   DAEMON_BEFORE: 084dfe803afaf956e225a593f77dc4388afd7f93
-  DAEMON_AFTER: 13c3cf27da2406455ce27940b9e329df39eae8b6
+  # lastdb main after "every new home is format 7" (#929): the candidate runs on a record home.
+  DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # CI uses the DEV Schema Service. The definition check and both daemons read
   # this one value, so they always name the same registry.
