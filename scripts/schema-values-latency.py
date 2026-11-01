@@ -20,6 +20,8 @@ SUMMARY_FIELDS = ("key", "payload_json", "updated_at")
 # An app before the buckets writes only the root row.
 SUMMARY_ROOT = "__all__"
 SUMMARY_KEYS = (SUMMARY_ROOT,) + tuple(f"__bucket_{bucket:02d}__" for bucket in range(32))
+# The untimed arm of this app on the format 6 daemon.
+FORMAT6_PROOF = "candidate-format6"
 
 
 def require(condition, message):
@@ -252,10 +254,13 @@ def finish_setup(node, output, cleanup):
 def arm(args, Node, cleanup, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
-    candidate = label == "candidate"
-    # The main app runs on the compatible daemon. This app runs on the format 7 daemon.
+    # The main app runs on the compatible format 6 daemon. This app runs on the
+    # format 7 daemon in the timed pairs, and once more on the format 6 daemon
+    # (label FORMAT6_PROOF) so both home formats run this app's index and delete paths.
+    candidate = label != "baseline"
+    record_daemon = label == "candidate"
     binary = args.candidate if candidate else args.baseline
-    daemon, revision = (args.daemon_after, args.daemon_after_revision) if candidate else (args.daemon_before, args.daemon_before_revision)
+    daemon, revision = (args.daemon_after, args.daemon_after_revision) if record_daemon else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
                 full_socket_name="folddb-full.sock", environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
@@ -265,6 +270,9 @@ def arm(args, Node, cleanup, label, pair):
     samples = {operation: [] for operation in OPERATIONS}
     try:
         node.start()
+        # The marker exists after the first start. Only the format 7 daemon may open a record home.
+        save(output / "home-format.json", {"format": node.home_format()})
+        require(node.record_home() == record_daemon, "An arm opened an unexpected home format")
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
         command(binary, node, config, "init", "--socket", str(node.socket))
@@ -365,6 +373,8 @@ def render(args, summary):
              "Field values and metadata membership remain equal across reopen. A format 6 home also keeps its atom identities and author metadata.",
              "This app also repeats setup. Before its timed updates, 12 metadata entries move to the root summary row.",
              "Four timed updates must move their entries back to bucket rows. The delete must remove the other eight from the root row.",
+             f"This app also runs the same steps once on the format 6 daemon `{args.daemon_before_revision}` (`{FORMAT6_PROOF}`).",
+             "That arm is not in the comparison table. Its create and update tails are below.",
              "Timings are advisory.",
              "Times include the CLI process and all app requests. They do not isolate database latency.", "",
              "| Operation | Before P50 ms | After P50 ms | Before P95 ms | After P95 ms | P95 change |", "|---|---:|---:|---:|---:|---:|"]
@@ -430,6 +440,8 @@ def main():
         for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"))):
             for label in order:
                 summary["arms"].append(arm(args,Node,cleanup,label,pair))
+        # One untimed proof arm: this app on the format 6 daemon. Its samples stay out of the comparison table.
+        summary["arms"].append(arm(args,Node,cleanup,FORMAT6_PROOF,0))
         text = render(args, summary)
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
             stream.write(text)
