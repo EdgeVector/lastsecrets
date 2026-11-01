@@ -267,6 +267,7 @@ A primary change requires Tom's authorization.
 
 The CI latency comparison uses the actual CLI and two exact daemon revisions.
 The main app runs on the compatible format 6 daemon. This app runs on a format 7 daemon from lastdb main.
+This app also runs the same steps once, untimed, on the format 6 daemon. Each arm must open the expected home format.
 Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.
 Every operation retains 64 calls per arm.
