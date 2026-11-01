@@ -5,7 +5,7 @@ import { INDEX_ROW_KEYS, INDEX_ROW_MAX_BYTES, indexBucketKey, storedPayloadBytes
 
 import {
   DeleteError, absentSlugs, deleteProgress, deleteReads, deleteReceipt,
-  deleteApiVersion, resolveDeleteSchemas, rollupAbsentSlugs, rollupRepairs, strictRollups, validateDeleteSlugs,
+  resolveDeleteSchemas, rollupAbsentSlugs, rollupRepairs, strictRollups, validateDeleteSlugs,
 } from "./batch.ts";
 
 export type SecretInput = {
@@ -63,8 +63,8 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
   validateDeleteSlugs(slugs);
   const progress = deleteProgress(slugs);
   try {
-    const catalog = await client.nativeBatch.schemas();
-    const schemas = resolveDeleteSchemas(catalog, config, await deleteApiVersion(client.nativeBatch, catalog));
+    const [catalog, version] = await Promise.all([client.nativeBatch.schemas(), client.nativeBatch.version()]);
+    const schemas = resolveDeleteSchemas(catalog, config, version);
     const reads = deleteReads(schemas, slugs);
     const before = await client.nativeBatch.readKeys(reads);
     absentSlugs(before, slugs);
