@@ -14,7 +14,9 @@ concurrency:
 env:
   APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 084dfe803afaf956e225a593f77dc4388afd7f93
+  # lastdb main before "every new home is format 7" (#929), at API 14: it still
+  # creates a format 6 home. This app refuses a node older than API 13 (#803).
+  DAEMON_BEFORE: 0706f0b12acc34f6a2e81ba7fc3fe5cae54dd9d3
   # lastdb main after "every new home is format 7" (#929): the candidate runs on a record home.
   DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

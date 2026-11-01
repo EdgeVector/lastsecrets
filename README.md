@@ -24,12 +24,11 @@ contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
-New homes require LastDB capability `owned_app_schemas_v1`.
-The app declares independent values for secret records and the metadata summary.
+New homes require LastDB API 13 or later (lastdb #803) and capability `owned_app_schemas_v1`.
+On API 13 and later, every schema owns its values. The secret records and the metadata summary use two such schemas.
 Canonical field definitions stay reusable. They do not share record values.
 These are separate record types, so this change adds no alternate key.
-An old home with shared values moves to this release only by the home copy. See "Existing homes" below.
-An alternate key does not prove that the schema owns its values.
+A home on an older node moves to this release only by the home copy. See "Existing homes" below.
 
 The initial schema contract is defined in `src/schema.ts`.
 
@@ -94,6 +93,7 @@ lastsecrets delete temporary-dev-invite temporary-dev-api-key
 
 The command accepts 1–63 distinct slugs and an optional `--config PATH`.
 It uses the current owner access and the same configured schema route as get and put.
+It reads the node API version with the schema list. It refuses a node older than API 13 with `home_copy_required` before it reads a key.
 It selects the configured name first, or the saved hash when the name is absent.
 It requires one exact installed name, the correct owner, complete field names, a hash key, and state Available.
 It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
@@ -240,19 +240,20 @@ A config without this map retains its existing data path.
 CAUTION: New canonical names produce new schema identities.
 A config without a field map keeps its existing field names.
 All new declarations require schema-owned values, with or without a field map.
-`init` and `publish` refuse shared values before the first declaration.
+`init` and `publish` refuse a node older than API 13 before the first declaration.
 They also refuse a change to a saved definition identity.
 The config write uses an atomic replacement and flushes the file and its directory.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
 
 ## Existing homes
 
-This release does not change a home in place. It has no command for old homes.
+This release requires LastDB API 13 or later (lastdb #803). It does not change a home in place. It has no command for old homes.
 
-CAUTION: Do not start this release on a home that holds the old shared-value LastSecrets layout.
-`init` and `publish` refuse that home with `home_copy_required` and make no change.
+CAUTION: Do not use this release on a node older than API 13.
+On that node, `init` and `publish` refuse a home that holds LastSecrets schemas with `home_copy_required` and make no change.
+`delete` refuses that node with `home_copy_required` and makes no change.
 
-An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
+A home on an older node moves to this release only by the home copy (EdgeVector/last-stack#377):
 
 1. The home copy reads the old home. It does not change the old home.
 2. The home copy writes the `LastSecret` and `LastSecretIndex` records, with the secret values, to a new home.
@@ -266,7 +267,8 @@ A primary change requires Tom's authorization.
 ## CI comparison
 
 The CI latency comparison uses the actual CLI and two exact daemon revisions.
-The main app runs on the compatible format 6 daemon. This app runs on a format 7 daemon from lastdb main.
+The main app runs on a format 6 daemon from lastdb main at API 14. This app runs on a format 7 daemon from lastdb main.
+This app refuses a node older than API 13, so the format 6 daemon is at API 14.
 This app also runs the same steps once, untimed, on the format 6 daemon. Each arm must open the expected home format.
 Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.

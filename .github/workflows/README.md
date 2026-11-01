@@ -9,7 +9,8 @@ check on `main`. The `publish` job builds the host-track artifact on a push to
 It uses exact app and LastDB revisions and registered definitions.
 The job sets `ENVIRONMENT=dev`. The definition check and both daemons use the DEV Schema Service from the daemon source.
 CI does not depend on production publisher authority.
-The main app runs on the compatible format 6 daemon. This app runs on a format 7 daemon from lastdb main.
+The main app runs on a format 6 daemon from lastdb main at API 14. This app runs on a format 7 daemon from lastdb main.
+This app refuses a node older than API 13, so the format 6 daemon is at API 14.
 This app also runs the same steps once, untimed, on the format 6 daemon.
 Each arm must open the expected home format.
 Each arm creates its own fresh home. No arm changes an old home.

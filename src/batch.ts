@@ -3,7 +3,7 @@ import type { Transport } from "@lastdb/app-sdk";
 import type { Config } from "./config.ts";
 import type { QueryRow } from "./lastdb.ts";
 import {
-  ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, apiVersionOf, lastSecretIndexSchema, lastSecretSchema, ownsValues, secretRef,
+  ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, apiVersionOf, lastSecretIndexSchema, lastSecretSchema, ownedHome, secretRef,
 } from "./schema.ts";
 import { INDEX_BUCKET_COUNT, indexBucketKey } from "./index-rows.ts";
 
@@ -250,40 +250,31 @@ function validMoleculeIdentity(value: unknown): value is string {
   return bytes.length === 32 && bytes.toString("base64url") === value;
 }
 
-/**
- * The node API version, read only when a listed LastSecrets schema omits
- * `independent_fields` (a stage 2 node). A current node sends the key, so a
- * delete makes no extra call. A failed read counts as an old node.
- */
-export async function deleteApiVersion(client: NativeBatchClient, body: unknown): Promise<number> {
-  const schemas = object(body).schemas;
-  const omitted = Array.isArray(schemas) && schemas.some((value) =>
-    object(value).owner_app_id === OWNER_APP_ID && object(value).independent_fields === undefined);
-  return omitted ? apiVersionOf(await client.version().catch(() => null)) : 0;
-}
-
+/** `version` is the `GET /api/version` reply. Delete runs only on a node that owns every schema's values. */
 export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
   "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases"
->, apiVersion = 0): { secret: string; index: string } {
+>, version: unknown): { secret: string; index: string } {
+  if (!ownedHome(apiVersionOf(version))) throw new DeleteError("home_copy_required");
   const catalog = object(body);
   if (catalog.ready !== true || !Array.isArray(catalog.schemas)) throw new DeleteError("schema_catalog_not_ready");
   const secretCanonical = Boolean(config.schemaFieldAliases?.[config.schemaHash]);
   const indexCanonical = Boolean(config.indexSchemaHash && config.schemaFieldAliases?.[config.indexSchemaHash]);
   return {
-    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, config.schemaName, secretCanonical, apiVersion),
-    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, config.indexSchemaName, indexCanonical, apiVersion),
+    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, config.schemaName, secretCanonical),
+    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, config.indexSchemaName, indexCanonical),
   };
 }
 function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,
-  configuredHash?: string, configuredName?: string, canonical = false, apiVersion = 0): string {
+  configuredHash?: string, configuredName?: string, canonical = false): string {
   let route = canonical ? configuredHash : configuredName || configuredHash;
   if (!configuredHash || !/^[a-f0-9]{64}$/.test(configuredHash) || !route) {
     throw new DeleteError("configured_schema_identity_mismatch");
   }
-  const independent = schemas.filter((value) => ownsValues(object(value).independent_fields, apiVersion) && object(value).identity_hash === configuredHash);
-  if (independent.length > 1) throw new DeleteError("schema_owner_identity_ambiguous");
-  if (independent.length === 1) {
-    const name = object(independent[0]).name;
+  // Every listed schema owns its values, so the identity alone selects the route.
+  const owned = schemas.filter((value) => object(value).identity_hash === configuredHash);
+  if (owned.length > 1) throw new DeleteError("schema_owner_identity_ambiguous");
+  if (owned.length === 1) {
+    const name = object(owned[0]).name;
     if (typeof name !== "string" || (configuredName && configuredName !== name)) throw new DeleteError("configured_schema_identity_mismatch");
     route = name;
   }
