@@ -165,11 +165,7 @@ export function resolveSocketPath(override?: string, configValue?: string): stri
   }
   if (configValue && configValue.length > 0) return configValue;
   const lastdbHome = process.env.LASTDB_HOME ?? join(homedir(), ".lastdb");
-  const folddbHome = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
-  const lastdbSocket = join(lastdbHome, "data", SOCKET_FILE_NAME);
-  const folddbSocket = join(folddbHome, "data", SOCKET_FILE_NAME);
-  if (existsSync(lastdbSocket)) return lastdbSocket;
-  return folddbSocket;
+  return join(lastdbHome, "data", SOCKET_FILE_NAME);
 }
 
 export function newLastDbClient(opts: {
@@ -248,11 +244,9 @@ export function newLastDbClient(opts: {
       const key = keys[position]!;
       const envelope = asObject(item);
       const page = asObject(envelope?.response);
-      // A Hash key names at most one record. An unresolved row is an unread
-      // row, not an absent one.
+      // A Hash key names at most one record.
       if (envelope?.status !== 200 || !page || page.ok === false || !Array.isArray(page.results) ||
-          page.results.length > 1 || page.has_more === true ||
-          (typeof page.unresolved_rows === "number" && page.unresolved_rows !== 0)) {
+          page.results.length > 1 || page.has_more === true) {
         throw new LastSecretsError("batch_read_ambiguous", `LastDB did not confirm the read of key ${key}.`);
       }
       if (page.results.length === 0) return null;

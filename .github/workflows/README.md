@@ -9,15 +9,13 @@ check on `main`. The `publish` job builds the host-track artifact on a push to
 It uses exact app and LastDB revisions and registered definitions.
 The job sets `ENVIRONMENT=dev`. The definition check and both daemons use the DEV Schema Service from the daemon source.
 CI does not depend on production publisher authority.
-The main app runs on a format 6 daemon from lastdb main at API 14. This app runs on a format 7 daemon from lastdb main.
-This app refuses a node older than API 13, so the format 6 daemon is at API 14.
-This app also runs the same steps once, untimed, on the format 6 daemon.
+The main app runs on a format 7 daemon from lastdb main. This app runs on the format 8 daemon (API 21) of lastdb PR 1014.
 Each arm must open the expected home format.
 Each arm creates its own fresh home. No arm changes an old home.
 Two balanced pairs compare the CLI requests of the two arms.
 The seed has 64 records with 4096 bytes per value. Both arms create 64 more records during the timed requests.
 All known values, metadata membership, repeat setup, deletion, and reopen remain required.
-A format 6 home also keeps its atom identities and author metadata. A format 7 home has none.
+Reopen and repeated setup must keep the values and the record metadata.
 Before the timed updates of this app, 12 metadata entries move to the root index row. The updates and the delete must remove them from that row.
 Timings are advisory.
 Raw values stay in process memory and the generated encrypted homes. CLI value output never enters an artifact or error.

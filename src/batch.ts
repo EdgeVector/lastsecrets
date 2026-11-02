@@ -18,15 +18,10 @@ const DELETE_READ_LIMIT = DELETE_SLUG_LIMIT + 1 + INDEX_BUCKET_COUNT;
 type ObjectRecord = Record<string, unknown>;
 export type ExactRead = { schema: string; key: string; fields: string[] };
 type ConflictState = "clean" | "conflict" | "unknown";
+/** One `selected_record_fields` result: the fields in request order and their states. */
 type SelectedConflict = {
-  /**
-   * `selected_record_fields` (a format 7 home): fields in request order with
-   * their kept losing values, and no molecule IDs. Otherwise
-   * `selected_field_molecules` (format 6): one molecule ID for each field.
-   */
-  records: boolean;
   state: ConflictState;
-  fields: { molecule_uuid: string | null; state: ConflictState }[];
+  fields: { state: ConflictState }[];
 };
 export type BatchMutation = {
   type: "mutation";
@@ -154,8 +149,7 @@ function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConfl
   const reply = object(envelope.response);
   if (reply.ok !== true || !Array.isArray(reply.results) || reply.results.length > 1 ||
       reply.returned_count !== reply.results.length || reply.limit !== 2 || reply.offset !== 0 ||
-      reply.has_more !== false || reply.next_cursor !== null || reply.unresolved_rows !== 0 ||
-      reply.tombstoned_rows !== 0 ||
+      reply.has_more !== false || reply.next_cursor !== null ||
       (reply.total_count !== null && reply.total_count !== reply.results.length)) {
     throw new DeleteError("key_read_ambiguous");
   }
@@ -171,37 +165,17 @@ function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConfl
   if (unknown && (!selected || selected.state !== "clean" || selected.fields.some((field) => field.state !== "clean"))) {
     throw new DeleteError("key_conflict_state_unknown");
   }
-  const metadata = object(row.metadata);
-  for (const [position, field] of read.fields.entries()) {
-    const meta = metadata[field];
-    if (meta === undefined) {
-      if (unknown && Object.hasOwn(fields, field)) throw new DeleteError("key_conflict_metadata_missing");
-      continue;
-    }
-    const info = object(meta);
-    const flag = info.has_conflicts;
-    if (flag !== undefined && flag !== false && !(unknown && flag === "unknown")) {
-      throw new DeleteError("key_conflict_state_ambiguous");
-    }
-    if (!unknown) continue;
-    if (selected!.records) {
-      // A format 7 home has records, not molecules: its query metadata names
-      // no molecule (atom_uuid is ""). A molecule ID here means the query and
-      // the selected reply describe different home formats.
-      if (info.molecule_uuid !== undefined && info.molecule_uuid !== null) {
-        throw new DeleteError("key_conflict_molecule_mismatch");
-      }
-    } else if (!validMoleculeIdentity(info.molecule_uuid) ||
-        info.molecule_uuid !== selected!.fields[position]!.molecule_uuid) {
-      throw new DeleteError("key_conflict_molecule_mismatch");
-    }
+  // The record carries the conflict flag: false when known clean, "unknown"
+  // when the page could not read its conflicts.
+  const flag = row.has_conflicts;
+  if (flag !== false && !(unknown && flag === "unknown")) {
+    throw new DeleteError("key_conflict_state_ambiguous");
   }
   return { fields, key: { hash: read.key, range: null } };
 }
 
 function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): SelectedConflict[] {
-  const records = reply.scope === "selected_record_fields";
-  if (reply.version !== 1 || !(records || reply.scope === "selected_field_molecules") || reply.count !== reads.length ||
+  if (reply.version !== 1 || reply.scope !== "selected_record_fields" || reply.count !== reads.length ||
       !Array.isArray(reply.results) || reply.results.length !== reads.length) {
     throw new DeleteError("selected_conflict_reply_ambiguous");
   }
@@ -209,45 +183,28 @@ function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): Select
     const result = object(value);
     if (!validConflictState(result.state) || !Array.isArray(result.fields) ||
         result.fields.length !== reads[position]!.fields.length) throw new DeleteError("selected_conflict_reply_ambiguous");
-    const fields = result.fields.map((value) => records ? selectedRecordField(value) : selectedMoleculeField(value));
+    const fields = result.fields.map(selectedRecordField);
     const combined = fields.some((field) => field.state === "unknown") ? "unknown" :
       fields.some((field) => field.state === "conflict") ? "conflict" : "clean";
     if (result.state !== combined) throw new DeleteError("selected_conflict_reply_ambiguous");
-    return { records, state: result.state, fields };
+    return { state: result.state, fields };
   });
 }
-/** Format 6: each selected field names its molecule; an unknown field may name none. */
-function selectedMoleculeField(value: unknown): SelectedConflict["fields"][number] {
-  const field = object(value);
-  if (!validConflictState(field.state) ||
-      !(validMoleculeIdentity(field.molecule_uuid) || (field.molecule_uuid === null && field.state === "unknown"))) {
-    throw new DeleteError("selected_conflict_reply_ambiguous");
-  }
-  return { molecule_uuid: field.molecule_uuid as string | null, state: field.state };
-}
 /**
- * Format 7: one entry per selected field, in request order, with the node's
- * field name and its kept losing values. Only a field with kept values is in
- * conflict. The values are never retained.
+ * One entry per selected field, in request order, with the node's field name
+ * and its kept losing values. Only a field with kept values is in conflict.
+ * The values are never retained.
  */
 function selectedRecordField(value: unknown): SelectedConflict["fields"][number] {
   const field = object(value);
   if (typeof field.field !== "string" || field.field.length === 0 || !validConflictState(field.state) ||
-      !Array.isArray(field.conflicts) || (field.state === "conflict") !== (field.conflicts.length > 0) ||
-      field.molecule_uuid !== undefined) {
+      !Array.isArray(field.conflicts) || (field.state === "conflict") !== (field.conflicts.length > 0)) {
     throw new DeleteError("selected_conflict_reply_ambiguous");
   }
-  return { molecule_uuid: null, state: field.state };
+  return { state: field.state };
 }
 function validConflictState(value: unknown): value is ConflictState {
   return value === "clean" || value === "conflict" || value === "unknown";
-}
-function validMoleculeIdentity(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  if (/^[a-fA-F0-9]{64}$/.test(value)) return true;
-  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
-  const bytes = Buffer.from(value, "base64url");
-  return bytes.length === 32 && bytes.toString("base64url") === value;
 }
 
 /** `version` is the `GET /api/version` reply. Delete runs only on a node that owns every schema's values. */

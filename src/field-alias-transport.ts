@@ -56,9 +56,12 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   const result = {...value};
   if (aliases) {
     const inverse = Object.fromEntries(Object.entries(aliases).map(([local, canonical]) => [canonical, local]));
-    for (const key of ["fields", "metadata"]) {
-      const fields = object(value[key]);
-      if (fields) result[key] = renameObject(fields, inverse, false);
+    const fields = object(value.fields);
+    if (fields) result.fields = renameObject(fields, inverse, false);
+    // A record has one metadata block, not one per field. Only
+    // `conflicted_fields` names fields.
+    if (Array.isArray(value.conflicted_fields)) {
+      result.conflicted_fields = value.conflicted_fields.map((field) => typeof field === "string" ? rename(field, inverse, false) : field);
     }
   }
   for (const key of ["results", "result", "response", "rows", "records", "data", "hits"]) {

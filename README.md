@@ -103,10 +103,10 @@ Each read collects all selected keys and sends two independent native batches in
 The normal keyed query and the owner-only selected conflict API use the same ordered selections.
 A known query flag keeps the current conflict checks. A verified empty query keeps the current absent result.
 A present query with unknown flags requires a complete clean selected conflict result.
-On a format 6 home, the result has the `selected_field_molecules` scope. Each present field must name the same molecule in both responses.
-On a format 7 home, the result has the `selected_record_fields` scope. It names no molecules. Each selected field must be clean with no kept losing value, and the query metadata must name no molecule.
+The result has the `selected_record_fields` scope. Each selected field must be clean with no kept losing value.
+A present query record must have `has_conflicts` false, or `"unknown"` when the query page cannot read its conflicts.
 A missing, incompatible, malformed, incomplete, unknown, or conflicted selected result stops that path before a mutation.
-The selected result covers the complete field molecule. An unrelated key conflict also prevents clean.
+The selected result covers each selected field of the record. A conflict in another selected field also prevents clean.
 The command does not infer conflict keys from legacy display strings or change the normal query flags.
 It sends one native Delete batch for every named key, even when its metadata projection is empty.
 These deletes have no version condition.
@@ -234,7 +234,7 @@ Neither command reads secret values.
 The command interface keeps local names such as `slug` and `label`.
 An explicit field map translates these names at the transport boundary.
 The config stores this map for each registered schema identity. Reads and writes use the pinned canonical identity.
-The map does not copy records or add another molecule.
+The map does not copy records or add another field key.
 A config without this map retains its existing data path.
 
 CAUTION: New canonical names produce new schema identities.
@@ -267,14 +267,13 @@ A primary change requires Tom's authorization.
 ## CI comparison
 
 The CI latency comparison uses the actual CLI and two exact daemon revisions.
-The main app runs on a format 6 daemon from lastdb main at API 14. This app runs on a format 7 daemon from lastdb main.
-This app refuses a node older than API 13, so the format 6 daemon is at API 14.
-This app also runs the same steps once, untimed, on the format 6 daemon. Each arm must open the expected home format.
+The main app runs on a format 7 daemon from lastdb main. This app runs on the format 8 daemon (API 21) of lastdb PR 1014.
+Each arm must open the expected home format.
 Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.
 Every operation retains 64 calls per arm.
 Complete values, metadata membership, deletion, repeat setup, and reopen remain required.
-A format 6 home also keeps its atom identities. A format 7 home has no atom identity, so its field metadata has an empty `atom_uuid`.
+Reopen and repeated setup must keep the values and the record metadata.
 Before the timed updates of this app, 12 metadata entries move to the root row. The updates and the delete must remove them from the root row.
 Latency includes the CLI process and all requests; it does not isolate database latency.
 

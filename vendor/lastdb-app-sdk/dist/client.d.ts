@@ -158,8 +158,8 @@ export declare class LastDbClient {
      * `403 {reason: "capability_required"}` (mapped to {@link PermissionDeniedError})
      * rather than handing back the owner's whole-index search.
      *
-     * Each hit is a full {@link QueryRow} envelope (`key`, `fields`, `metadata`,
-     * `authorPubKey`) plus the relevance `score` and the `schemaName` /
+     * Each hit is a full {@link QueryRow} envelope (`key`, `fields`, `metadata`)
+     * plus the relevance `score` and the `schemaName` /
      * `schemaDisplayName` the hit came from.
      */
     search(query: string, opts?: SearchOptions): Promise<SearchResult>;
@@ -204,9 +204,9 @@ export declare class LastDbClient {
  *
  * The node returns its rows under `results` (production `fold_db_node`) or
  * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
- * `{ key, fields, metadata, author_pub_key }`. Each row is normalized to a
+ * `{ key, fields, metadata, has_conflicts }`. Each row is normalized to a
  * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
- * is still accepted: its `key`/`metadata`/`authorPubKey` come back empty/null
+ * is still accepted: its `key`/`metadata` come back empty/null
  * and the whole object is its `fields` — so the SDK never throws away an
  * envelope the node sends, nor invents one it doesn't.
  */
@@ -217,12 +217,12 @@ export declare function parseQueryResponse(body: unknown): QueryResult;
  * The node wraps the hits in its standard envelope: `{ ok, results: [...],
  * user_hash }` (the `ApiResponse<IndexSearchResponse>` shape). Each element of
  * `results` is a full `/api/query` row envelope (`key`, `fields`, `metadata`,
- * `author_pub_key`) with three search-only fields the node adds per hit:
+ * `has_conflicts`) with three search-only fields the node adds per hit:
  * `schema_name`, `schema_display_name`, and `score`. Hits arrive in the node's
  * relevance order and are surfaced verbatim — the SDK preserves it.
  *
  * The row part is parsed by the SAME {@link parseQueryRow} used for `query()`,
- * so the envelope handling (enveloped vs bare row, null author) is identical.
+ * so the envelope handling (enveloped vs bare row) is identical.
  */
 export declare function parseSearchResponse(body: unknown): SearchResult;
 /** Parse `GET /api/system/auto-identity` success JSON. */
