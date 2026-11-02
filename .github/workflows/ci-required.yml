@@ -48,20 +48,6 @@ jobs:
           RESULT: ${{ needs.gate.result }}
         run: test "$RESULT" = success
 
-  publish:
-    name: publish
-    needs: [ci-required]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    permissions:
-      contents: read
-    uses: EdgeVector/last-stack/.github/workflows/registry-app-package.yml@main
-    with:
-      # The artifact is a compiled bun binary (dist/lastsecrets). app registry
-      # installs on Apple silicon, so build on a macOS arm64 runner.
-      runs-on: macos-latest
-      setup-bun: true
-      build-command: "bun install --frozen-lockfile && bun run build"
-
   registry-commit:
     name: Registry commit identity
     needs: [ci-required]
