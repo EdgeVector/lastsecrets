@@ -4,8 +4,8 @@
 #
 # `ci-required` is the branch-protection check. It runs .lastgit/ci.sh
 # (shell syntax, typecheck, artifact build) unchanged. `publish` runs
-# on a push to main only, after the gate is green, and uploads the host-track
-# artifact `ht-artifact-<sha>`. `host-track refresh lastsecrets` on the Mac pulls
+# on a push to main only, after the gate is green, and uploads the app registry
+# artifact `ht-artifact-<sha>`. `app registry refresh lastsecrets` on the Mac pulls
 # it (last-stack-github-artifact-pull), re-checks every digest, and promotes
 # the stable channel.
 name: ci-required
@@ -54,9 +54,9 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
-    uses: EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main
+    uses: EdgeVector/last-stack/.github/workflows/registry-app-package.yml@main
     with:
-      # The artifact is a compiled bun binary (dist/lastsecrets). host-track
+      # The artifact is a compiled bun binary (dist/lastsecrets). app registry
       # installs on Apple silicon, so build on a macOS arm64 runner.
       runs-on: macos-latest
       setup-bun: true

@@ -1,0 +1,13 @@
+{
+  "artifacts": [
+    {
+      "app": "lastsecrets",
+      "paths": [
+        "bin",
+        "dist",
+        "lastdb-app.json"
+      ],
+      "platform": "darwin-arm64"
+    }
+  ]
+}
