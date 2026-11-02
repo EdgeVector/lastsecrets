@@ -37,7 +37,7 @@ export type BrainKey = {
 };
 
 export type BrainClient = {
-  /** Page through the live keys for a schema without loading atom bodies. */
+  /** Page through the live keys for a schema without loading field values. */
   listKeys(schema: string): Promise<BrainKey[]>;
   /** Read one live record by its exact key. */
   queryByKey(schema: string, key: BrainKey, fields: string[]): Promise<BrainRecord | null>;

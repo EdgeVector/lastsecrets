@@ -12,13 +12,13 @@ concurrency:
   group: lastsecrets-values-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 env:
-  APP_BEFORE: 9590819f04f4e6018de594789abf3ebeef93f787
+  # LastSecrets main before the API 21 readers.
+  APP_BEFORE: 7ebd88387632e97b99f9b4e8f3c41e41dba240f4
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  # lastdb main before "every new home is format 7" (#929), at API 14: it still
-  # creates a format 6 home. This app refuses a node older than API 13 (#803).
-  DAEMON_BEFORE: 0706f0b12acc34f6a2e81ba7fc3fe5cae54dd9d3
-  # lastdb main after "every new home is format 7" (#929): the candidate runs on a record home.
-  DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
+  # lastdb main after "every new home is format 7" (#929): the main app runs on a format 7 home.
+  DAEMON_BEFORE: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
+  # lastdb main after format 8 (API 21, #1014).
+  DAEMON_AFTER: 372552e8d6a8ad0f6c325f82029a91ca910acea5
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # CI uses the DEV Schema Service. The definition check and both daemons read
   # this one value, so they always name the same registry.

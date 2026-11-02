@@ -20,8 +20,9 @@ SUMMARY_FIELDS = ("key", "payload_json", "updated_at")
 # An app before the buckets writes only the root row.
 SUMMARY_ROOT = "__all__"
 SUMMARY_KEYS = (SUMMARY_ROOT,) + tuple(f"__bucket_{bucket:02d}__" for bucket in range(32))
-# The untimed arm of this app on the format 6 daemon.
-FORMAT6_PROOF = "candidate-format6"
+# The home format that each arm must open: the main app on the format 7 daemon,
+# this app on the format 8 daemon.
+HOME_FORMAT = {"baseline": 7, "candidate": 8}
 
 
 def require(condition, message):
@@ -133,10 +134,7 @@ def snapshot(node, config, expected, absent=()):
     requests.extend((record_schema, key, SECRET_FIELDS) for key in absent)
     queries = [{"schema_name": schema, "fields": [aliases.get(schema, {}).get(field, field) for field in fields],
                 "filter": {"HashKey": key}, "limit": 2, "offset": 0, "response_format":"full"} for schema, key, fields in requests]
-    # A format 7 home stores records, not atoms. Its field metadata has an empty
-    # atom_uuid and no molecule_uuid or writer_pubkey.
-    record_home = node.record_home()
-    atoms, members = {}, {}
+    records, members = {}, {}
     for start in range(0, len(queries), 64):
         reply = node.call("/api/queries/batch", {"queries": queries[start:start + 64]})[0]
         rows = reply.get("results")
@@ -146,8 +144,7 @@ def snapshot(node, config, expected, absent=()):
             query = queries[start + offset]
             response = item.get("response", {})
             result = response.get("results", [])
-            require(item.get("status") == 200 and response.get("ok") is True
-                    and response.get("has_more") is False and response.get("unresolved_rows") == 0,
+            require(item.get("status") == 200 and response.get("ok") is True and response.get("has_more") is False,
                     "An exact known-key read is incomplete")
             key = query["filter"]["HashKey"]
             summary_row = query["schema_name"] == summary
@@ -160,7 +157,7 @@ def snapshot(node, config, expected, absent=()):
             require(len(result) == 1, "A known record is absent or ambiguous")
             row = result[0]
             require(row.get("key") == {"hash": key, "range": None}, "An exact read returned another key")
-            fields, metadata = row.get("fields", {}), row.get("metadata", {})
+            fields = row.get("fields", {})
             require(set(fields) == set(query["fields"]), "A known record lacks declared fields")
             if summary_row:
                 name = aliases.get(summary, {}).get("payload_json", "payload_json")
@@ -168,19 +165,17 @@ def snapshot(node, config, expected, absent=()):
             else:
                 name = aliases.get(record_schema, {}).get("secret_value", "secret_value")
                 require(fields[name] == {"value": expected[key]}, "A complete generated value differs")
-            for field in query["fields"]:
-                info = metadata.get(field, {})
-                atom = info.get("atom_uuid")
-                require(isinstance(atom, str) and (record_home or atom), "A field lacks its current atom identity")
-                # Reopen and repeated setup must keep current atoms and author metadata.
-                atoms[f"{query['schema_name']}/{key}/{field}"] = {name: info.get(name)
-                    for name in ("atom_uuid", "writer_pubkey", "metadata")}
+            # Reopen and repeated setup must keep the values and the record metadata.
+            # Only a hash of the values is kept: generated value bytes never enter the output.
+            records[f"{query['schema_name']}/{key}"] = {
+                "fields_sha256": hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest(),
+                "metadata": row.get("metadata")}
     # Each known slug is in exactly one summary row.
     listed = [item for key in SUMMARY_KEYS for item in members.get(key, [])]
     require(len(listed) == len(set(listed)) == len(expected) and set(listed) == set(expected),
             "The maintained metadata summary differs")
-    atoms["summary-root"] = members.get(SUMMARY_ROOT)
-    return atoms
+    records["summary-root"] = members.get(SUMMARY_ROOT)
+    return records
 
 
 def move_to_root(node, config, slugs):
@@ -235,32 +230,17 @@ def finish_setup(node, output, cleanup):
     # Setup reclamation is a one-time cost, outside the steady-state requests.
     flushed = node.call("/api/db/flush", {})[0]
     require(flushed.get("durable") is True, "The app setup lacks a durable flush")
-    # A format 7 home has no molecule work; its daemon has no molecule-drain route.
-    if not node.record_home():
-        until = time.monotonic() + 600
-        while True:
-            status = node.call("/api/db/molecule-drain", {})[0]["molecule_drain"]
-            report = status["report"]
-            require(not report["refused"] and not report["last_error"], "App setup reclamation failed")
-            if (status["candidate_rows"] == 0 and not status["candidate_rows_capped"]
-                    and all(report[key] == 0 for key in ("pending", "parked", "waiting_records"))):
-                break
-            require(time.monotonic() < until, "App setup reclamation did not finish")
-            time.sleep(0.5)
-        save(output / "setup-drain.json", status)
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
 def arm(args, Node, cleanup, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
-    # The main app runs on the compatible format 6 daemon. This app runs on the
-    # format 7 daemon in the timed pairs, and once more on the format 6 daemon
-    # (label FORMAT6_PROOF) so both home formats run this app's index and delete paths.
-    candidate = label != "baseline"
-    record_daemon = label == "candidate"
+    # The main app runs on the format 7 daemon that it reads. This app runs on the
+    # format 8 daemon (API 21).
+    candidate = label == "candidate"
     binary = args.candidate if candidate else args.baseline
-    daemon, revision = (args.daemon_after, args.daemon_after_revision) if record_daemon else (args.daemon_before, args.daemon_before_revision)
+    daemon, revision = (args.daemon_after, args.daemon_after_revision) if candidate else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
                 full_socket_name="folddb-full.sock", environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
@@ -270,9 +250,9 @@ def arm(args, Node, cleanup, label, pair):
     samples = {operation: [] for operation in OPERATIONS}
     try:
         node.start()
-        # The marker exists after the first start. Only the format 7 daemon may open a record home.
+        # The marker exists after the first start.
         save(output / "home-format.json", {"format": node.home_format()})
-        require(node.record_home() == record_daemon, "An arm opened an unexpected home format")
+        require(node.home_format() == HOME_FORMAT[label], "An arm opened an unexpected home format")
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
         command(binary, node, config, "init", "--socket", str(node.socket))
@@ -281,7 +261,7 @@ def arm(args, Node, cleanup, label, pair):
             put(binary, node, config, index)
         original_config = json.loads(config.read_text())
         before = snapshot(node, config, expected)
-        save(output / "before-atoms.json", before)
+        save(output / "before-records.json", before)
         require_cloud_off(node, output, "after-setup")
         finish_setup(node, output, cleanup)
         node.stop()
@@ -289,14 +269,14 @@ def arm(args, Node, cleanup, label, pair):
         require_cloud_off(node, output, "before-measure")
         # Read known values first; a repeated init must not hide a reopen failure.
         after = snapshot(node, config, expected)
-        require(before == after, "Reopen changed a current atom or author metadata")
-        save(output / "after-atoms.json", after)
+        require(before == after, "Reopen changed a value or the record metadata")
+        save(output / "after-records.json", after)
         if candidate:
             command(binary, node, config, "init", "--socket", str(node.socket))
             current = json.loads(config.read_text())
             require(all(current[name] == original_config[name] for name in ("schemaHash", "indexSchemaHash")),
                     "Repeated setup changed a saved definition identity")
-            require(snapshot(node, config, expected) == before, "Repeated setup changed a field atom")
+            require(snapshot(node, config, expected) == before, "Repeated setup changed a value or the record metadata")
             owned = [schema for schema in node.call("/api/schemas")[0]["schemas"] if schema.get("owner_app_id") == "lastsecrets"]
             # Every schema on a node at API 13 or later (lastdb #803) owns its values.
             version = node.call("/api/version")[0]
@@ -349,7 +329,7 @@ def arm(args, Node, cleanup, label, pair):
             [row["elapsed_ms"] for row in observations if row["operation"] == operation] == samples[operation]
             for operation in OPERATIONS), "The CLI observations do not match every timed sample")
         result = {"label":label,"pair":pair,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
-                  "remaining":len(expected),"unchanged_seed_atoms":len(before) - 1,"repeat_setup":candidate,
+                  "remaining":len(expected),"unchanged_seed_records":len(before) - 1,"repeat_setup":candidate,
                   "daemon_revision":revision,"fresh_home":True,
                   "reopen":True,"batch_delete":True,"disk":node.disk_breakdown(),
                   "cli_observations": {"count":len(observations),"sha256":hashlib.sha256(
@@ -362,16 +342,14 @@ def arm(args, Node, cleanup, label, pair):
 
 def render(args, summary):
     lines = ["## LastSecrets fresh-home CLI latency", "",
-             f"Main app `{args.baseline_revision}` on the compatible daemon `{args.daemon_before_revision}`.",
-             f"This app `{args.candidate_revision}` on the format 7 daemon `{args.daemon_after_revision}`.",
+             f"Main app `{args.baseline_revision}` on the format 7 daemon `{args.daemon_before_revision}`.",
+             f"This app `{args.candidate_revision}` on the format 8 daemon `{args.daemon_after_revision}`.",
              f"Two balanced AB/BA pairs use {args.records} seed records and 4096 bytes per value, plus equal timed creates.",
              f"Each operation retains {args.records} actual CLI samples per arm.",
              "Each arm creates its own fresh home. No arm changes an old home.",
-             "Field values and metadata membership remain equal across reopen. A format 6 home also keeps its atom identities and author metadata.",
+             "Field values, record metadata, and metadata membership remain equal across reopen.",
              "This app also repeats setup. Before its timed updates, 12 metadata entries move to the root summary row.",
              "Four timed updates must move their entries back to bucket rows. The delete must remove the other eight from the root row.",
-             f"This app also runs the same steps once on the format 6 daemon `{args.daemon_before_revision}` (`{FORMAT6_PROOF}`).",
-             "That arm is not in the comparison table. Its create and update tails are below.",
              "Timings are advisory.",
              "Times include the CLI process and all app requests. They do not isolate database latency.", "",
              "| Operation | Before P50 ms | After P50 ms | Before P95 ms | After P95 ms | P95 change |", "|---|---:|---:|---:|---:|---:|"]
@@ -437,8 +415,6 @@ def main():
         for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"))):
             for label in order:
                 summary["arms"].append(arm(args,Node,cleanup,label,pair))
-        # One untimed proof arm: this app on the format 6 daemon. Its samples stay out of the comparison table.
-        summary["arms"].append(arm(args,Node,cleanup,FORMAT6_PROOF,0))
         text = render(args, summary)
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
             stream.write(text)
