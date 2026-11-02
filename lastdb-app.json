@@ -1,0 +1,44 @@
+{
+  "app_id": "lastsecrets",
+  "version": "0.1.0",
+  "source": "https://github.com/EdgeVector/lastsecrets.git",
+  "metadata": {
+    "display_name": "lastsecrets",
+    "description": "LastSecrets: LastDB-backed local secret references with no-index secret values",
+    "homepage_url": "https://github.com/EdgeVector/lastsecrets"
+  },
+  "run": {
+    "runtime": "bun",
+    "entrypoint": "src/cli.ts"
+  },
+  "schemas": [],
+  "install": {
+    "prepare": [
+      {
+        "argv": [
+          "bun",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "timeout_s": 300
+      }
+    ],
+    "links": [
+      {
+        "source": "bin/registry-lastsecrets",
+        "command": "lastsecrets"
+      }
+    ],
+    "probe": [
+      {
+        "argv": [
+          "./bin/registry-lastsecrets",
+          "schema-json"
+        ],
+        "timeout_s": 30
+      }
+    ],
+    "post_install": [],
+    "requires": []
+  }
+}
