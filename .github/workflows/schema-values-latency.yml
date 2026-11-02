@@ -17,9 +17,8 @@ env:
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   # lastdb main after "every new home is format 7" (#929): the main app runs on a format 7 home.
   DAEMON_BEFORE: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
-  # The format 8 daemon (API 21) of lastdb PR 1014. Set this to the lastdb main
-  # commit of PR 1014 before this workflow change merges.
-  DAEMON_AFTER: 4d31ef7638230d51d2cb971adcfd52d4eb7f96dd
+  # lastdb main after format 8 (API 21, #1014).
+  DAEMON_AFTER: 372552e8d6a8ad0f6c325f82029a91ca910acea5
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # CI uses the DEV Schema Service. The definition check and both daemons read
   # this one value, so they always name the same registry.
