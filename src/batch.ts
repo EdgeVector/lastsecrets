@@ -11,18 +11,12 @@ export const DELETE_METADATA_FIELDS = lastSecretSchema.schema.fields.filter(
   (field) => field !== "secret_value",
 );
 export const DELETE_SLUG_LIMIT = 63;
-/** The native limit of one `/api/queries/batch` and one `/api/conflicts/keys` request. */
+/** The native limit of one `/api/queries/batch` request. */
 const NATIVE_KEY_LIMIT = 64;
 /** The slugs, the root index row and at most one bucket row per slug. */
 const DELETE_READ_LIMIT = DELETE_SLUG_LIMIT + 1 + INDEX_BUCKET_COUNT;
 type ObjectRecord = Record<string, unknown>;
 export type ExactRead = { schema: string; key: string; fields: string[] };
-type ConflictState = "clean" | "conflict" | "unknown";
-/** One `selected_record_fields` result: the fields in request order and their states. */
-type SelectedConflict = {
-  state: ConflictState;
-  fields: { state: ConflictState }[];
-};
 export type BatchMutation = {
   type: "mutation";
   schema: string;
@@ -92,22 +86,16 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
     return parsed;
   };
   const readChunk = async (reads: ExactRead[]): Promise<(QueryRow | null)[]> => {
-    // Independent bounded reads share the normal owner transport. An absent
-    // endpoint never proves clean; known query flags retain their old path.
-    const [reply, selected] = await Promise.all([
-      send("POST", "/api/queries/batch", {
-        queries: reads.map((read) => ({
-          schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
-        })),
-      }),
-      send("POST", "/api/conflicts/keys", {
-        keys: reads.map((read) => ({ schema_name: read.schema, fields: read.fields, hash: read.key })),
-      }).then((reply) => parseSelectedConflicts(reply, reads)).catch(() => null),
-    ]);
+    // Bounded reads share the normal owner transport.
+    const reply = await send("POST", "/api/queries/batch", {
+      queries: reads.map((read) => ({
+        schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
+      })),
+    });
     if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
       throw new DeleteError("read_batch_reply_ambiguous");
     }
-    return reply.results.map((item, position) => parseExactRead(item, reads[position]!, selected?.[position]));
+    return reply.results.map((item, position) => parseExactRead(item, reads[position]!));
   };
   return {
     async schemas() { return send("GET", "/api/schemas"); },
@@ -143,7 +131,7 @@ function object(value: unknown): ObjectRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new DeleteError("reply_shape_ambiguous");
   return value as ObjectRecord;
 }
-function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConflict): QueryRow | null {
+function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
   const envelope = object(item);
   if (envelope.status !== 200) throw new DeleteError("key_read_unconfirmed");
   const reply = object(envelope.response);
@@ -160,51 +148,7 @@ function parseExactRead(item: unknown, read: ExactRead, selected?: SelectedConfl
   if (key.hash !== read.key || key.range !== null || Object.keys(fields).some((field) => !read.fields.includes(field))) {
     throw new DeleteError("key_read_scope_mismatch");
   }
-  const unknown = reply.conflict_flags === "unknown";
-  if (reply.conflict_flags !== "known" && !unknown) throw new DeleteError("key_conflict_state_unknown");
-  if (unknown && (!selected || selected.state !== "clean" || selected.fields.some((field) => field.state !== "clean"))) {
-    throw new DeleteError("key_conflict_state_unknown");
-  }
-  // The record carries the conflict flag: false when known clean, "unknown"
-  // when the page could not read its conflicts.
-  const flag = row.has_conflicts;
-  if (flag !== false && !(unknown && flag === "unknown")) {
-    throw new DeleteError("key_conflict_state_ambiguous");
-  }
   return { fields, key: { hash: read.key, range: null } };
-}
-
-function parseSelectedConflicts(reply: ObjectRecord, reads: ExactRead[]): SelectedConflict[] {
-  if (reply.version !== 1 || reply.scope !== "selected_record_fields" || reply.count !== reads.length ||
-      !Array.isArray(reply.results) || reply.results.length !== reads.length) {
-    throw new DeleteError("selected_conflict_reply_ambiguous");
-  }
-  return reply.results.map((value, position) => {
-    const result = object(value);
-    if (!validConflictState(result.state) || !Array.isArray(result.fields) ||
-        result.fields.length !== reads[position]!.fields.length) throw new DeleteError("selected_conflict_reply_ambiguous");
-    const fields = result.fields.map(selectedRecordField);
-    const combined = fields.some((field) => field.state === "unknown") ? "unknown" :
-      fields.some((field) => field.state === "conflict") ? "conflict" : "clean";
-    if (result.state !== combined) throw new DeleteError("selected_conflict_reply_ambiguous");
-    return { state: result.state, fields };
-  });
-}
-/**
- * One entry per selected field, in request order, with the node's field name
- * and its kept losing values. Only a field with kept values is in conflict.
- * The values are never retained.
- */
-function selectedRecordField(value: unknown): SelectedConflict["fields"][number] {
-  const field = object(value);
-  if (typeof field.field !== "string" || field.field.length === 0 || !validConflictState(field.state) ||
-      !Array.isArray(field.conflicts) || (field.state === "conflict") !== (field.conflicts.length > 0)) {
-    throw new DeleteError("selected_conflict_reply_ambiguous");
-  }
-  return { state: field.state };
-}
-function validConflictState(value: unknown): value is ConflictState {
-  return value === "clean" || value === "conflict" || value === "unknown";
 }
 
 /** `version` is the `GET /api/version` reply. Delete runs only on a node that owns every schema's values. */

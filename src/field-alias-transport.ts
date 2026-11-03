@@ -4,7 +4,7 @@
 import type { Transport } from "@lastdb/app-sdk";
 export type FieldAliasProfiles = Record<string, Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
-const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|conflicts|app\/search)(\/|$)/;
+const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|app\/search)(\/|$)/;
 function object(value: unknown): ObjectValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : null;
 }
@@ -58,11 +58,6 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
     const inverse = Object.fromEntries(Object.entries(aliases).map(([local, canonical]) => [canonical, local]));
     const fields = object(value.fields);
     if (fields) result.fields = renameObject(fields, inverse, false);
-    // A record has one metadata block, not one per field. Only
-    // `conflicted_fields` names fields.
-    if (Array.isArray(value.conflicted_fields)) {
-      result.conflicted_fields = value.conflicted_fields.map((field) => typeof field === "string" ? rename(field, inverse, false) : field);
-    }
   }
   for (const key of ["results", "result", "response", "rows", "records", "data", "hits"]) {
     if (value[key] !== undefined) result[key] = decodeItem(value[key], profiles, aliases);
