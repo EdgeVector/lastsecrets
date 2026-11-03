@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Hosted-CI latency for the actual CLI. Each app version starts on its own fresh home."""
+"""Hosted-CI latency for the actual CLI. Each app version starts on its own fresh home.
+
+Old app vs new app: both arms run the same latest lastdb nightly daemon.
+"""
 import argparse
 import hashlib
 import json
@@ -20,9 +23,6 @@ SUMMARY_FIELDS = ("key", "payload_json", "updated_at")
 # An app before the buckets writes only the root row.
 SUMMARY_ROOT = "__all__"
 SUMMARY_KEYS = (SUMMARY_ROOT,) + tuple(f"__bucket_{bucket:02d}__" for bucket in range(32))
-# The home format that each arm must open: the main app on the format 7 daemon,
-# this app on the format 8 daemon.
-HOME_FORMAT = {"baseline": 7, "candidate": 8}
 
 
 def require(condition, message):
@@ -233,15 +233,40 @@ def finish_setup(node, output, cleanup):
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
+def nightly_node(Node):
+    """The benchmark Node, started on a nightly release daemon.
+
+    The helper requires the `bench-<revision>` version of a CI build. A nightly
+    reports `<core>-nightly.<date>.g<oid9>` instead, so this start checks that
+    the daemon reports the nightly source revision.
+    """
+    class NightlyNode(Node):
+        def start(self):
+            try:
+                super().start()
+            except RuntimeError as error:
+                # Valid only without workers: start() skips its worker check after this error.
+                if ("differs from the selected revision" not in str(error)
+                        or self.process is None or self.process.poll() is not None):
+                    raise
+            version = json.dumps(json.loads((self.output / "version.json").read_text()))
+            require("-nightly." in version and f".g{self.revision[:9]}" in version,
+                    "The actual daemon version is not the nightly of the selected revision")
+    return NightlyNode
+
+
+def node_api_version(node):
+    version = node.call("/api/version")[0]
+    return (version.get("data") or version).get("api_version", 0)
+
+
 def arm(args, Node, cleanup, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
-    # The main app runs on the format 7 daemon that it reads. This app runs on the
-    # format 8 daemon (API 21).
+    # Both arms run the same nightly daemon; only the app differs.
     candidate = label == "candidate"
     binary = args.candidate if candidate else args.baseline
-    daemon, revision = (args.daemon_after, args.daemon_after_revision) if candidate else (args.daemon_before, args.daemon_before_revision)
-    node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
+    node = Node(args.daemon, args.daemon_revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
                 environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
     config = output / "config.json"
@@ -250,9 +275,9 @@ def arm(args, Node, cleanup, label, pair):
     samples = {operation: [] for operation in OPERATIONS}
     try:
         node.start()
-        # The marker exists after the first start.
-        save(output / "home-format.json", {"format": node.home_format()})
-        require(node.home_format() == HOME_FORMAT[label], "An arm opened an unexpected home format")
+        # The marker exists after the first start. Record the observed home format and API.
+        home = {"format": node.home_format(), "api_version": node_api_version(node)}
+        save(output / "home-format.json", home)
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
         command(binary, node, config, "init", "--socket", str(node.socket))
@@ -279,9 +304,7 @@ def arm(args, Node, cleanup, label, pair):
             require(snapshot(node, config, expected) == before, "Repeated setup changed a value or the record metadata")
             owned = [schema for schema in node.call("/api/schemas")[0]["schemas"] if schema.get("owner_app_id") == "lastsecrets"]
             # Every schema on a node at API 13 or later (lastdb #803) owns its values.
-            version = node.call("/api/version")[0]
-            api_version = (version.get("data") or version).get("api_version", 0)
-            require(len(owned) == 2 and api_version >= 13, "The actual app does not own exactly two schemas")
+            require(len(owned) == 2 and home["api_version"] >= 13, "The actual app does not own exactly two schemas")
             require(all(not schema.get("alternate_keys") for schema in owned), "Different record types became alternate keys")
         for index in range(args.records):
             result, elapsed = command(binary, node, config, "get", slug(index), operation="get")
@@ -330,7 +353,8 @@ def arm(args, Node, cleanup, label, pair):
             for operation in OPERATIONS), "The CLI observations do not match every timed sample")
         result = {"label":label,"pair":pair,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
                   "remaining":len(expected),"unchanged_seed_records":len(before) - 1,"repeat_setup":candidate,
-                  "daemon_revision":revision,"fresh_home":True,
+                  "daemon_revision":args.daemon_revision,"daemon_tag":args.daemon_tag,
+                  "home_format":home["format"],"api_version":home["api_version"],"fresh_home":True,
                   "reopen":True,"batch_delete":True,"disk":node.disk_breakdown(),
                   "cli_observations": {"count":len(observations),"sha256":hashlib.sha256(
                       (output / "cli-observations.jsonl").read_bytes()).hexdigest()}}
@@ -341,9 +365,11 @@ def arm(args, Node, cleanup, label, pair):
 
 
 def render(args, summary):
+    observed = sorted({(item["home_format"], item["api_version"]) for item in summary["arms"]}, key=str)
     lines = ["## LastSecrets fresh-home CLI latency", "",
-             f"Main app `{args.baseline_revision}` on the format 7 daemon `{args.daemon_before_revision}`.",
-             f"This app `{args.candidate_revision}` on the format 8 daemon `{args.daemon_after_revision}`.",
+             f"Old app `{args.baseline_revision}` and new app `{args.candidate_revision}` both run the latest lastdb nightly "
+             f"`{args.daemon_tag}` (source `{args.daemon_revision}`).",
+             "Observed home format and API: " + ", ".join(f"format {home} / API {api}" for home, api in observed) + ".",
              f"Two balanced AB/BA pairs use {args.records} seed records and 4096 bytes per value, plus equal timed creates.",
              f"Each operation retains {args.records} actual CLI samples per arm.",
              "Each arm creates its own fresh home. No arm changes an old home.",
@@ -382,9 +408,9 @@ def render(args, summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("baseline", "candidate", "daemon-before", "daemon-after", "lastdb-source", "output"):
+    for name in ("baseline", "candidate", "daemon", "lastdb-source", "output"):
         parser.add_argument("--" + name, type=Path, required=name == "output")
-    for name in ("baseline-revision", "candidate-revision", "daemon-before-revision", "daemon-after-revision"):
+    for name in ("baseline-revision", "candidate-revision", "daemon-revision", "daemon-tag"):
         parser.add_argument("--" + name)
     parser.add_argument("--records", type=int, default=64)
     parser.add_argument("--audit-only", action="store_true")
@@ -396,12 +422,14 @@ def main():
     if args.audit_only:
         audit_output(args.output, args.records)
         return
-    require(all(getattr(args,name) for name in ("baseline", "candidate", "daemon_before", "daemon_after", "lastdb_source",
-                "baseline_revision", "candidate_revision", "daemon_before_revision", "daemon_after_revision")), "All exact source and program inputs are required")
+    require(all(getattr(args,name) for name in ("baseline", "candidate", "daemon", "lastdb_source",
+                "baseline_revision", "candidate_revision", "daemon_revision", "daemon_tag")), "All exact source and program inputs are required")
     require(all(re.fullmatch(r"[a-f0-9]{40}", getattr(args,name)) for name in
-                ("baseline_revision", "candidate_revision", "daemon_before_revision", "daemon_after_revision")), "Exact source revisions are required")
+                ("baseline_revision", "candidate_revision", "daemon_revision")), "Exact source revisions are required")
+    require(re.fullmatch(r"nightly-[0-9]{8}-[a-f0-9]{9}", args.daemon_tag) and args.daemon_tag.endswith(args.daemon_revision[:9]),
+            "The nightly tag does not name the daemon source revision")
     require(subprocess.check_output(["git", "-C", str(args.lastdb_source), "rev-parse", "HEAD"], text=True).strip()
-            == args.daemon_after_revision, "The actual daemon support source differs")
+            == args.daemon_revision, "The actual daemon support source differs")
     require(not args.output.exists() and args.output.parent.resolve().is_relative_to(runner), "A fresh runner output path is required")
     args.output.mkdir(mode=0o700)
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
@@ -409,8 +437,9 @@ def main():
     sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
     from node import Node, file_hash
     import cleanup
+    Node = nightly_node(Node)
     summary = {"complete":False,"sources":{name:str(item) for name,item in vars(args).items()},"arms":[],
-               "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon_before","daemon_after")}}
+               "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon")}}
     try:
         for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"))):
             for label in order:

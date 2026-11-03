@@ -12,15 +12,13 @@ concurrency:
   group: lastsecrets-values-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 env:
-  # LastSecrets main before the API 21 readers.
-  APP_BEFORE: 7ebd88387632e97b99f9b4e8f3c41e41dba240f4
+  # Old app vs new app. Both arms run the latest lastdb nightly daemon (Tom, 2026-11-03);
+  # daemon-vs-daemon comparisons belong in lastdb's own benchmark CI.
+  # The old app is the PR base, or the previous main on a push. A manual run compares HEAD with itself.
+  APP_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
-  # lastdb main after "every new home is format 7" (#929): the main app runs on a format 7 home.
-  DAEMON_BEFORE: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
-  # lastdb main after format 8 (API 21, #1014).
-  DAEMON_AFTER: 372552e8d6a8ad0f6c325f82029a91ca910acea5
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  # Both daemons read this value and use the DEV Schema Service.
+  # The daemon reads this value and uses the DEV Schema Service.
   ENVIRONMENT: dev
 jobs:
   compare:
@@ -38,67 +36,84 @@ jobs:
           ref: ${{ env.APP_BEFORE }}
           path: baseline
           persist-credentials: false
+      - name: Fetch the latest lastdb nightly
+        id: nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh release list -R EdgeVector/lastdb --exclude-drafts --limit 30 \
+            --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
+          test -n "$tag" && test "$tag" != null
+          dir="$RUNNER_TEMP/lastdb-nightly"
+          mkdir -p "$dir"
+          gh release download "$tag" -R EdgeVector/lastdb -D "$dir" \
+            -p 'lastdb-x86_64-unknown-linux-gnu.tar.gz' -p 'lastdb-x86_64-unknown-linux-gnu.manifest.json' -p SHA256SUMS.txt
+          (cd "$dir" && grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS.txt | sha256sum -c -)
+          tar -xzf "$dir/lastdb-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
+          for name in lastdb lastdbd; do
+            want="$(jq -r --arg n "$name" '.binaries[] | select(.name == $n) | .sha256' "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
+            test "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$want"
+          done
+          oid="$(jq -r .source_git_oid "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
+          sum="$(grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' "$dir/SHA256SUMS.txt" | cut -d' ' -f1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+          echo "lastdbd=$dir/lastdbd" >> "$GITHUB_OUTPUT"
+          echo "lastdb=$dir/lastdb" >> "$GITHUB_OUTPUT"
+          printf '### LastDB under test\n\nNightly `%s` (source `%s`), Linux tarball sha256 `%s`.\n' "$tag" "$oid" "$sum" >> "$GITHUB_STEP_SUMMARY"
+      # The benchmark helpers (node.py, cleanup.py, artifact.py) match the nightly daemon source.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: EdgeVector/lastdb
-          ref: ${{ env.DAEMON_BEFORE }}
-          path: daemon-before
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: EdgeVector/lastdb
-          ref: ${{ env.DAEMON_AFTER }}
-          path: daemon-after
+          ref: ${{ steps.nightly.outputs.oid }}
+          path: lastdb
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.10'
       - name: Require the actual source revisions
+        env:
+          DAEMON_TAG: ${{ steps.nightly.outputs.tag }}
+          DAEMON_REVISION: ${{ steps.nightly.outputs.oid }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$APP_AFTER"
           test "$(git -C baseline rev-parse HEAD)" = "$APP_BEFORE"
-          test "$(git -C daemon-before rev-parse HEAD)" = "$DAEMON_BEFORE"
-          test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
+          test "$(git -C lastdb rev-parse HEAD)" = "$DAEMON_REVISION"
           mkdir "$RUNNER_TEMP/lastsecrets-revisions"
-          printf 'App before: %s\nApp after: %s\nDaemon before: %s\nDaemon after: %s\n' \
-            "$APP_BEFORE" "$APP_AFTER" "$DAEMON_BEFORE" "$DAEMON_AFTER" \
+          printf 'App before: %s\nApp after: %s\nDaemon (both arms): %s at %s\n' \
+            "$APP_BEFORE" "$APP_AFTER" "$DAEMON_TAG" "$DAEMON_REVISION" \
             > "$RUNNER_TEMP/lastsecrets-revisions/revisions.txt"
-      - name: Build the two actual daemons and CLI releases
+      - name: Build the two actual CLI releases
         env:
-          CARGO_BUILD_JOBS: '3'
-          CARGO_TERM_COLOR: never
+          DAEMON: ${{ steps.nightly.outputs.lastdbd }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/lastsecrets-binaries"
-          for label in before after; do
-            if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
-            cd "$GITHUB_WORKSPACE/daemon-$label"
-            FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" \
-              CARGO_TARGET_DIR="$RUNNER_TEMP/lastsecrets-target-$label" \
-              cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
-            cp "$RUNNER_TEMP/lastsecrets-target-$label/dev-release/lastdbd" "$RUNNER_TEMP/lastsecrets-binaries/daemon-$label"
-            rm -rf "$RUNNER_TEMP/lastsecrets-target-$label"
-          done
+          cp "$DAEMON" "$RUNNER_TEMP/lastsecrets-binaries/daemon"
           for label in baseline candidate; do
             cd "$GITHUB_WORKSPACE/$label"
             bun install --frozen-lockfile
             bun build src/cli.ts --compile --outfile "$RUNNER_TEMP/lastsecrets-binaries/$label"
           done
           cd "$RUNNER_TEMP/lastsecrets-binaries"
-          sha256sum daemon-before daemon-after baseline candidate > SHA256SUMS
+          sha256sum daemon baseline candidate > SHA256SUMS
           sha256sum --check SHA256SUMS
       - name: Compare normal app operations on fresh homes
         id: operations
+        env:
+          DAEMON_TAG: ${{ steps.nightly.outputs.tag }}
+          DAEMON_REVISION: ${{ steps.nightly.outputs.oid }}
         run: |
           python3 candidate/scripts/schema-values-latency.py \
             --baseline "$RUNNER_TEMP/lastsecrets-binaries/baseline" --baseline-revision "$APP_BEFORE" \
             --candidate "$RUNNER_TEMP/lastsecrets-binaries/candidate" --candidate-revision "$APP_AFTER" \
-            --daemon-before "$RUNNER_TEMP/lastsecrets-binaries/daemon-before" --daemon-before-revision "$DAEMON_BEFORE" \
-            --daemon-after "$RUNNER_TEMP/lastsecrets-binaries/daemon-after" --daemon-after-revision "$DAEMON_AFTER" \
-            --lastdb-source "$GITHUB_WORKSPACE/daemon-after" --records 64 \
+            --daemon "$RUNNER_TEMP/lastsecrets-binaries/daemon" --daemon-revision "$DAEMON_REVISION" --daemon-tag "$DAEMON_TAG" \
+            --lastdb-source "$GITHUB_WORKSPACE/lastdb" --records 64 \
             --output "$RUNNER_TEMP/lastsecrets-results"
       - name: Check retained output for generated value bytes
         if: ${{ always() && steps.operations.outcome != 'skipped' }}
@@ -133,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-metadata.json"
-          python3 daemon-after/scripts/benchmarks/artifact.py \
+          python3 lastdb/scripts/benchmarks/artifact.py \
             --metadata "$RUNNER_TEMP/measurement-metadata.json" --output "$RUNNER_TEMP/measurement-receipt"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/measurement.zip"
           printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/measurement.zip" | sha256sum --check

@@ -261,9 +261,8 @@ A primary change requires Tom's authorization.
 
 ## CI comparison
 
-The CI latency comparison uses the actual CLI and two exact daemon revisions.
-The main app runs on a format 7 daemon from lastdb main. This app runs on the format 8 daemon (API 21) of lastdb PR 1014.
-Each arm must open the expected home format.
+The CI latency comparison uses the actual CLI. It compares the old app (the PR base) with the new app.
+Both arms run the same latest lastdb nightly daemon. Each arm records the observed home format and API version.
 Each arm creates its own fresh home. No arm changes an old home.
 Two AB/BA pairs start with 64 records and 4096 bytes per value.
 Every operation retains 64 calls per arm.
