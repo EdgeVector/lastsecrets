@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 
 import {
   LastDbClient as SdkLastDbClient,
@@ -236,7 +235,7 @@ export function newLastDbClient(opts: {
       requestBody = JSON.stringify(body);
     }
 
-    const socket = isLoopbackNodeUrl(nodeUrl) ? routeSocketPathFor(method, path, socketPath) : null;
+    const socket = isLoopbackNodeUrl(nodeUrl) ? socketPath : null;
     const url = socket ? `http://localhost${path}` : `${nodeUrl}${path}`;
     let response: Response;
     try {
@@ -413,24 +412,6 @@ function isLoopbackNodeUrl(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isFullSurfaceSocket(socketPath: string): boolean {
-  return basename(socketPath) === "folddb-full.sock";
-}
-
-function routeSocketPathFor(method: string, path: string, socketPath: string): string {
-  if (isFullSurfaceSocket(socketPath)) return socketPath;
-  if (
-    (method === "POST" && (path === "/api/query" || path === "/api/mutation")) ||
-    (method === "POST" && path === "/api/schemas/declare") ||
-    (method === "POST" && path === "/api/apps/declare-schema") ||
-    (method === "GET" && (path === "/api/schemas" || path === "/api/system/auto-identity"))
-  ) {
-    return socketPath;
-  }
-  const full = join(dirname(socketPath), "folddb-full.sock");
-  return existsSync(full) ? full : socketPath;
 }
 
 function parseBody(text: string): unknown {
