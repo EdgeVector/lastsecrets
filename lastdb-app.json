@@ -11,7 +11,159 @@
     "runtime": "bun",
     "entrypoint": "src/cli.ts"
   },
-  "schemas": [],
+  "schemas": [
+    {
+      "name": "LastSecret",
+      "owner_app_id": "lastsecrets",
+      "descriptive_name": "LastSecret",
+      "purpose_statement": "Local secret record whose raw value is intentionally excluded from automatic search indexes",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "secret_locator_slug"
+      },
+      "fields": [
+        "secret_locator_slug",
+        "secret_display_name",
+        "secret_provider_name",
+        "secret_usage_description",
+        "secret_environment_name",
+        "secret_text_envelope",
+        "secret_created_at",
+        "secret_updated_at"
+      ],
+      "field_types": {
+        "secret_locator_slug": "String",
+        "secret_display_name": "String",
+        "secret_provider_name": "String",
+        "secret_usage_description": "String",
+        "secret_environment_name": "String",
+        "secret_text_envelope": {
+          "Object": {
+            "value": "String"
+          }
+        },
+        "secret_created_at": "DateTime",
+        "secret_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "secret_locator_slug": "the stable slug in a lastsecrets:// secret locator",
+        "secret_display_name": "the non-secret display name of a secret",
+        "secret_provider_name": "the service or system to which a secret belongs",
+        "secret_usage_description": "the non-secret description of the intended use of a secret",
+        "secret_environment_name": "the named environment in which a secret is used",
+        "secret_text_envelope": "a secret text value inside its value envelope; excluded from automatic search",
+        "secret_created_at": "the RFC 3339 instant when a secret record was created",
+        "secret_updated_at": "the RFC 3339 instant when a secret record was last updated"
+      },
+      "field_classifications": {
+        "secret_display_name": [
+          "word"
+        ],
+        "secret_provider_name": [
+          "word"
+        ],
+        "secret_usage_description": [
+          "word"
+        ],
+        "secret_environment_name": [
+          "word"
+        ],
+        "secret_text_envelope": [
+          "secret",
+          "no_index"
+        ]
+      },
+      "field_data_classifications": {
+        "secret_locator_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_display_name": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_provider_name": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_usage_description": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_environment_name": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_text_envelope": {
+          "sensitivity_level": 3,
+          "data_domain": "secret"
+        },
+        "secret_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        }
+      },
+      "field_versions": {
+        "secret_locator_slug": 1,
+        "secret_display_name": 1,
+        "secret_provider_name": 1,
+        "secret_usage_description": 1,
+        "secret_environment_name": 1,
+        "secret_text_envelope": 1,
+        "secret_created_at": 1,
+        "secret_updated_at": 1
+      }
+    },
+    {
+      "name": "LastSecretIndex",
+      "owner_app_id": "lastsecrets",
+      "descriptive_name": "LastSecretIndex",
+      "purpose_statement": "Metadata-only rollup of every LastSecret so list/search never full-scan the secret-bearing schema",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "secret_metadata_bucket_key"
+      },
+      "fields": [
+        "secret_metadata_bucket_key",
+        "secret_metadata_list_json",
+        "secret_metadata_updated_at"
+      ],
+      "field_types": {
+        "secret_metadata_bucket_key": "String",
+        "secret_metadata_list_json": "String",
+        "secret_metadata_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "secret_metadata_bucket_key": "the exact key of a secret metadata list; __all__ names the complete local list",
+        "secret_metadata_list_json": "a JSON-encoded array of secret metadata records with no secret text values",
+        "secret_metadata_updated_at": "the RFC 3339 instant when a secret metadata list was last updated"
+      },
+      "field_classifications": {},
+      "field_data_classifications": {
+        "secret_metadata_bucket_key": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_metadata_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        },
+        "secret_metadata_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "metadata"
+        }
+      },
+      "field_versions": {
+        "secret_metadata_bucket_key": 1,
+        "secret_metadata_list_json": 1,
+        "secret_metadata_updated_at": 1
+      }
+    }
+  ],
   "install": {
     "prepare": [
       {

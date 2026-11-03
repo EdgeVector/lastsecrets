@@ -35,7 +35,7 @@ LastDB API 13 (lastdb #803) makes every schema own its values. The app refuses a
 These schemas hold different records. Do not combine them as alternate keys.
 Canonical field reuse supplies definitions only. It does not share record values.
 A home on an older node moves only by the home copy (EdgeVector/last-stack#377).
-`init`, `publish` and `delete` refuse that home with `home_copy_required`. The app has no in-place command for old homes.
+`init` and `delete` refuse that home with `home_copy_required`. The app has no in-place command for old homes.
 Field aliases select field names; they never select the record-ownership model.
 Do not change the primary during source or CI work.
 

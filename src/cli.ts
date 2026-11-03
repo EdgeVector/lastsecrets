@@ -82,8 +82,8 @@ export async function run(
         schemaFieldAliases:existing?.schemaFieldAliases,
         canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
       });
-      // Mini owns resolve/registration and must return Schema Service catalog
-      // identities; private visibility is not a local-only schema mode.
+      // The node declares both owned schemas and returns their definition
+      // identities. LastSecrets never writes to Schema Service itself.
       const [{ canonical, schemaName }, { canonical: indexCanonical, schemaName: indexSchemaName }] =
         await Promise.all([
           client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema),
@@ -109,95 +109,6 @@ export async function run(
       io.stdout.write(`initialized LastSecrets config at ${configPath}\n`);
       io.stdout.write(`schema=${canonical}\n`);
       io.stdout.write(`index-schema=${indexCanonical}\n`);
-      io.stdout.write(`schemas registered with Schema Service; run \`lastsecrets publish\` to add distribution governance.\n`);
-      return 0;
-    }
-
-    // Add distribution governance and verify the already-required Schema
-    // Service registrations so other people can install/depend on LastSecrets.
-    // Requires Mini with register-for-distribution routes
-    // (fold main after PR #469) and a reachable schema service.
-    if (command === "publish") {
-      const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
-      const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
-      const socketPath = resolveSocketPath(opts.socketPath);
-      const configPath = opts.config ?? defaultConfigPath();
-      let existing: Config | null = null;
-      try { existing = readConfig(configPath); } catch (error) {
-        if (!(error instanceof ConfigError) || error.code !== "config_missing") throw error;
-      }
-      const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
-      const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
-        schemaFieldAliases:existing?.schemaFieldAliases,
-        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
-      });
-
-      const [secret, summary] = await Promise.all([
-        client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema),
-        client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema),
-      ]);
-      if (existing && (existing.schemaHash !== secret.canonical || existing.indexSchemaHash !== summary.canonical)) {
-        throw new Error("The installed schema identities differ from this config. Publication leaves the config unchanged.");
-      }
-
-      const registered = await client.registerForDistribution(OWNER_APP_ID, [
-        lastSecretSchema.schema,
-        lastSecretIndexSchema.schema,
-      ]);
-      for (const item of registered.items) {
-        const err = item.error ? ` error=${item.error}` : "";
-        io.stdout.write(
-          `register ${item.schema_name || "?"} status=${item.status} hash=${item.identity_hash || "-"}${err}\n`,
-        );
-      }
-      if (!registered.ok) {
-        throw new Error(
-          "register-for-distribution failed for one or more schemas (Schema Service reachable? Mini on fold main?)",
-        );
-      }
-
-      const identities = registered.items
-        .map((i) => i.identity_hash)
-        .filter((h) => h.length > 0);
-      const verified = await client.verifyDistributionReady(OWNER_APP_ID, identities);
-      for (const item of verified.items) {
-        const err = item.error ? ` error=${item.error}` : "";
-        io.stdout.write(`verify ${item.identity} status=${item.status}${err}\n`);
-      }
-      if (!verified.ready) {
-        throw new Error(
-          "verify-distribution-ready failed: not all schemas are present on Schema Service",
-        );
-      }
-
-      // Keep local config pinned to the registered identities when possible.
-      const primary = registered.items.find((i) => i.schema_name.endsWith("/LastSecret"));
-      const indexItem = registered.items.find((i) => i.schema_name.endsWith("/LastSecretIndex"));
-      if (primary?.identity_hash !== secret.canonical || indexItem?.identity_hash !== summary.canonical) {
-        throw new Error("Distribution identities differ from the installed owned schemas. The config stays unchanged.");
-      }
-      if (primary?.identity_hash) {
-        writeConfig(
-          {
-            configVersion: 1,
-            nodeUrl: existing?.nodeUrl ?? nodeUrl,
-            userHash: existing?.userHash ?? userHash,
-            schemaHash: primary.identity_hash,
-            schemaName: secret.schemaName,
-            indexSchemaHash: indexItem?.identity_hash ?? existing?.indexSchemaHash,
-            indexSchemaName: summary.schemaName,
-            nodeSocketPath: existing?.nodeSocketPath ?? socketPath,
-            schemaFieldAliases:client.schemaFieldAliases,
-          },
-          configPath,
-        );
-        io.stdout.write(`updated config at ${configPath}\n`);
-      }
-
-      io.stdout.write(
-        `published: LastSecrets schemas registered on Schema Service (ready for others to install/depend).\n`,
-      );
       return 0;
     }
 
@@ -488,7 +399,6 @@ function requireOpt(opts: Options, key: "label" | "provider" | "purpose" | "env"
 function usage(): string {
   return [
     "usage: lastsecrets init [--config PATH] [--node-url URL] [--socket PATH]",
-    "       lastsecrets publish [--config PATH] [--node-url URL] [--socket PATH]",
     "       lastsecrets schema-json",
     "       lastsecrets vocabulary-json",
     "       lastsecrets put <slug> --label TEXT --provider TEXT --purpose TEXT --env TEXT --value-stdin",
@@ -502,7 +412,6 @@ function usage(): string {
     "       lastsecrets guard [PATH...]",
     "",
     "init     — declare schema-owned values through Mini and pin definition identities.",
-    "publish  — add distribution governance and verify Schema Service identities.",
     "admin-slice — emit metadata-only JSON for the admin delivery path.",
     "delete   — delete exact local slugs and repair metadata; emit a value-free JSON receipt.",
   ].join("\n");

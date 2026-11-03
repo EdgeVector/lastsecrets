@@ -6,8 +6,8 @@ check on `main`. The `publish` job builds the host-track artifact on a push to
 `main`. LastGit and Forgejo copies are frozen.
 
 `schema-values-latency.yml` runs the normal LastSecrets CLI on generated homes.
-It uses exact app and LastDB revisions and registered definitions.
-The job sets `ENVIRONMENT=dev`. The definition check and both daemons use the DEV Schema Service from the daemon source.
+It uses exact app and LastDB revisions.
+The job sets `ENVIRONMENT=dev`. Both daemons use the DEV Schema Service from the daemon source. LastSecrets itself writes no schema to Schema Service.
 CI does not depend on production publisher authority.
 The main app runs on a format 7 daemon from lastdb main. This app runs on the format 8 daemon (API 21) of lastdb PR 1014.
 Each arm must open the expected home format.

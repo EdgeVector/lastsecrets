@@ -26,32 +26,6 @@ export type QueryRow = {
   key: { hash: string | null; range: string | null };
 };
 
-export type DistributionRegisterItem = {
-  app_id: string;
-  schema_name: string;
-  identity_hash: string;
-  status: "registered" | "already_exists" | "error";
-  error?: string;
-};
-
-export type RegisterForDistributionResult = {
-  app_id: string;
-  items: DistributionRegisterItem[];
-  ok: boolean;
-};
-
-export type DistributionReadyItem = {
-  identity: string;
-  status: "present" | "missing" | "error";
-  error?: string;
-};
-
-export type VerifyDistributionReadyResult = {
-  app_id: string;
-  items: DistributionReadyItem[];
-  ready: boolean;
-};
-
 export type LastDbClient = {
   readonly schemaFieldAliases?: FieldAliasProfiles;
   nativeBatch: NativeBatchClient;
@@ -60,19 +34,6 @@ export type LastDbClient = {
     appId: string,
     schema: SchemaDefinition,
   ): Promise<{ canonical: string; schemaName: string }>;
-  /**
-   * Add distribution governance for already-required Schema Service catalog
-   * identities so other people can install/depend on this app.
-   */
-  registerForDistribution(
-    appId: string,
-    schemas: SchemaDefinition[],
-  ): Promise<RegisterForDistributionResult>;
-  /** Fail closed if any required schema identity is missing on Schema Service. */
-  verifyDistributionReady(
-    appId: string,
-    schemaIdentities: string[],
-  ): Promise<VerifyDistributionReadyResult>;
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -356,58 +317,6 @@ export function newLastDbClient(opts: {
       if (canonicalMode) Object.assign(fieldProfiles, profilesFor(local, [identity, runtime]));
       return {canonical:identity, schemaName:runtime};
     },
-    async registerForDistribution(appId, schemas) {
-      const canonicalMode = await useCanonicalVocabulary();
-      const localSchemas = schemas;
-      if (canonicalMode) schemas = schemas.map(canonicalSchema);
-      const body = await callJson("/api/apps/register-for-distribution", "POST", {
-        app_id: appId,
-        schemas,
-      });
-      const data = unwrapData(body);
-      const items = Array.isArray(data.items)
-        ? (data.items as Record<string, unknown>[]).map(parseRegisterItem)
-        : [];
-      const ok =
-        typeof data.ok === "boolean"
-          ? data.ok
-          : items.length > 0 &&
-            items.every((i) => i.status === "registered" || i.status === "already_exists");
-      if (items.length === 0) {
-        throw new LastSecretsError(
-          "distribution_register_bad_response",
-          "LastDB register-for-distribution returned no items.",
-        );
-      }
-      if (canonicalMode) for (const local of localSchemas) {
-        const item = items.find((item) => item.schema_name === `${appId}/${local.name}` || item.schema_name === local.name);
-        if (item?.identity_hash && item.status !== "error") Object.assign(fieldProfiles, profilesFor(local, [item.identity_hash, item.schema_name]));
-      }
-      return {
-        app_id: typeof data.app_id === "string" ? data.app_id : appId,
-        items,
-        ok,
-      };
-    },
-    async verifyDistributionReady(appId, schemaIdentities) {
-      const body = await callJson("/api/apps/verify-distribution-ready", "POST", {
-        app_id: appId,
-        schema_identities: schemaIdentities,
-      });
-      const data = unwrapData(body);
-      const items = Array.isArray(data.items)
-        ? (data.items as Record<string, unknown>[]).map(parseReadyItem)
-        : [];
-      const ready =
-        typeof data.ready === "boolean"
-          ? data.ready
-          : items.length > 0 && items.every((i) => i.status === "present");
-      return {
-        app_id: typeof data.app_id === "string" ? data.app_id : appId,
-        items,
-        ready,
-      };
-    },
     async createRecord({ schemaHash, fields, keyHash }) {
       await sdkDataPath((client) =>
         client.mutate(schemaHash, {
@@ -516,8 +425,6 @@ function routeSocketPathFor(method: string, path: string, socketPath: string): s
     (method === "POST" && (path === "/api/query" || path === "/api/mutation")) ||
     (method === "POST" && path === "/api/schemas/declare") ||
     (method === "POST" && path === "/api/apps/declare-schema") ||
-    (method === "POST" && path === "/api/apps/register-for-distribution") ||
-    (method === "POST" && path === "/api/apps/verify-distribution-ready") ||
     (method === "GET" && (path === "/api/schemas" || path === "/api/system/auto-identity"))
   ) {
     return socketPath;
@@ -559,34 +466,6 @@ function unwrapData(body: unknown): Record<string, unknown> {
     return rec.data as Record<string, unknown>;
   }
   return rec;
-}
-
-function parseRegisterItem(raw: Record<string, unknown>): DistributionRegisterItem {
-  const statusRaw = typeof raw.status === "string" ? raw.status : "error";
-  const status =
-    statusRaw === "registered" || statusRaw === "already_exists" || statusRaw === "error"
-      ? statusRaw
-      : "error";
-  return {
-    app_id: typeof raw.app_id === "string" ? raw.app_id : "",
-    schema_name: typeof raw.schema_name === "string" ? raw.schema_name : "",
-    identity_hash: typeof raw.identity_hash === "string" ? raw.identity_hash : "",
-    status,
-    error: typeof raw.error === "string" ? raw.error : undefined,
-  };
-}
-
-function parseReadyItem(raw: Record<string, unknown>): DistributionReadyItem {
-  const statusRaw = typeof raw.status === "string" ? raw.status : "error";
-  const status =
-    statusRaw === "present" || statusRaw === "missing" || statusRaw === "error"
-      ? statusRaw
-      : "error";
-  return {
-    identity: typeof raw.identity === "string" ? raw.identity : "",
-    status,
-    error: typeof raw.error === "string" ? raw.error : undefined,
-  };
 }
 
 export function redactKnownSecretWords(value: string): string {
