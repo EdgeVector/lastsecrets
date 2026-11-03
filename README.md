@@ -99,15 +99,9 @@ It requires one exact installed name, the correct owner, complete field names, a
 It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
 A retired name claim remains valid for this exact installed route. The command never switches to another schema name.
 It reads fixed metadata fields only. It never reads or prints a secret value.
-Each read collects all selected keys and sends two independent native batches in parallel.
-The normal keyed query and the owner-only selected conflict API use the same ordered selections.
-A known query flag keeps the current conflict checks. A verified empty query keeps the current absent result.
-A present query with unknown flags requires a complete clean selected conflict result.
-The result has the `selected_record_fields` scope. Each selected field must be clean with no kept losing value.
-A present query record must have `has_conflicts` false, or `"unknown"` when the query page cannot read its conflicts.
-A missing, incompatible, malformed, incomplete, unknown, or conflicted selected result stops that path before a mutation.
-The selected result covers each selected field of the record. A conflict in another selected field also prevents clean.
-The command does not infer conflict keys from legacy display strings or change the normal query flags.
+Each read collects all selected keys and sends them as native keyed query batches of at most 64 keys, in parallel.
+A verified empty query result means the key is absent.
+A malformed, incomplete, or out-of-scope query result stops that path before a mutation.
 It sends one native Delete batch for every named key, even when its metadata projection is empty.
 These deletes have no version condition.
 
@@ -123,7 +117,7 @@ CAUTION: The Delete batch and the metadata repair are separate requests.
 A failure can leave a deleted secret with an old metadata entry.
 A concurrent write can recreate a named key or change the rollup.
 The command refuses ambiguous metadata and stops after a conflict or an uncertain write.
-Selected conflict metadata describes one read. It is not a transaction or a conditional-write token.
+Each metadata read describes one moment. It is not a transaction or a conditional-write token.
 It does not retry automatically. Read the value-free JSON receipt before a separate cleanup attempt.
 Exit 0 means the Delete batch received an ack and the final metadata reads show absence.
 The result is an observed metadata state. It does not prove full-record or secret-value tip absence.
