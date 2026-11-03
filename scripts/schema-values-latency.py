@@ -242,7 +242,7 @@ def arm(args, Node, cleanup, label, pair):
     binary = args.candidate if candidate else args.baseline
     daemon, revision = (args.daemon_after, args.daemon_after_revision) if candidate else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
-                full_socket_name="folddb-full.sock", environment={"LASTDB_SELF_METRICS_TO_DB":"false",
+                environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
     config = output / "config.json"
     expected = {slug(index): value(index) for index in range(args.records)}
