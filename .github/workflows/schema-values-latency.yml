@@ -20,8 +20,7 @@ env:
   # lastdb main after format 8 (API 21, #1014).
   DAEMON_AFTER: 372552e8d6a8ad0f6c325f82029a91ca910acea5
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  # CI uses the DEV Schema Service. The definition check and both daemons read
-  # this one value, so they always name the same registry.
+  # Both daemons read this value and use the DEV Schema Service.
   ENVIRONMENT: dev
 jobs:
   compare:
@@ -62,15 +61,10 @@ jobs:
           test "$(git -C baseline rev-parse HEAD)" = "$APP_BEFORE"
           test "$(git -C daemon-before rev-parse HEAD)" = "$DAEMON_BEFORE"
           test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
-          mkdir "$RUNNER_TEMP/lastsecrets-definition-results"
+          mkdir "$RUNNER_TEMP/lastsecrets-revisions"
           printf 'App before: %s\nApp after: %s\nDaemon before: %s\nDaemon after: %s\n' \
             "$APP_BEFORE" "$APP_AFTER" "$DAEMON_BEFORE" "$DAEMON_AFTER" \
-            > "$RUNNER_TEMP/lastsecrets-definition-results/revisions.txt"
-      - name: Require registered app definitions before the build
-        run: |
-          bun candidate/scripts/schema-definitions.mjs "$GITHUB_WORKSPACE/baseline" \
-            "$GITHUB_WORKSPACE/candidate" "$RUNNER_TEMP/lastsecrets-definition-results/definitions.json" \
-            "$GITHUB_WORKSPACE/daemon-after"
+            > "$RUNNER_TEMP/lastsecrets-revisions/revisions.txt"
       - name: Build the two actual daemons and CLI releases
         env:
           CARGO_BUILD_JOBS: '3'
@@ -112,12 +106,12 @@ jobs:
         run: |
           python3 candidate/scripts/schema-values-latency.py --audit-only --records 64 \
             --output "$RUNNER_TEMP/lastsecrets-results"
-      - name: Retain definition results
+      - name: Retain source revisions
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lastsecrets-definitions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/lastsecrets-definition-results/
+          name: lastsecrets-revisions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lastsecrets-revisions/
           if-no-files-found: error
           retention-days: 14
       - name: Retain raw measurement samples and source identities

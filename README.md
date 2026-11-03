@@ -225,9 +225,10 @@ The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax ch
 ## Canonical field vocabulary
 
 New schema declarations use the reviewed definitions in `src/canonical-fields.json`.
-A fresh home submits these definitions through normal schema declarations.
-The schema service checks names, definitions, types, and concept reuse for every caller.
+A fresh home submits these definitions through normal schema declarations on the local LastDB node.
+LastSecrets never writes to Schema Service itself.
 No special vocabulary key or operator approval path exists.
+`lastdb-app.json` lists the same two canonical schemas, with every field typed. After a schema change, run `bun scripts/write-app-manifest.ts` to regenerate that list from `src/schema.ts` and `src/canonical-fields.json`.
 `lastsecrets vocabulary-json` exports the definitions. `lastsecrets schema-json` exports the canonical secret schema.
 Neither command reads secret values.
 
@@ -240,8 +241,8 @@ A config without this map retains its existing data path.
 CAUTION: New canonical names produce new schema identities.
 A config without a field map keeps its existing field names.
 All new declarations require schema-owned values, with or without a field map.
-`init` and `publish` refuse a node older than API 13 before the first declaration.
-They also refuse a change to a saved definition identity.
+`init` refuses a node older than API 13 before the first declaration.
+It also refuses a change to a saved definition identity.
 The config write uses an atomic replacement and flushes the file and its directory.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
 
@@ -250,7 +251,7 @@ Ordinary reads and writes use the saved schema addresses. They never declare sch
 This release requires LastDB API 13 or later (lastdb #803). It does not change a home in place. It has no command for old homes.
 
 CAUTION: Do not use this release on a node older than API 13.
-On that node, `init` and `publish` refuse a home that holds LastSecrets schemas with `home_copy_required` and make no change.
+On that node, `init` refuses a home that holds LastSecrets schemas with `home_copy_required` and make no change.
 `delete` refuses that node with `home_copy_required` and makes no change.
 
 A home on an older node moves to this release only by the home copy (EdgeVector/last-stack#377):
