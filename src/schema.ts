@@ -27,7 +27,6 @@ export type SchemaDefinition = {
   descriptive_name: string;
   purpose_statement: string;
   schema_type: "Hash";
-  key: { hash_field: string };
   record_keys: { primary: { kind: "hash" }; alternates: Record<string, never> };
   fields: string[];
   field_types: Record<string, FieldType>;
@@ -55,7 +54,6 @@ export const lastSecretSchema: AddSchemaRequest = {
     purpose_statement:
       "Local secret record whose raw value is intentionally excluded from automatic search indexes",
     schema_type: "Hash",
-    key: { hash_field: "slug" },
     record_keys: { primary: { kind: "hash" }, alternates: {} },
     fields: [
       "slug",
@@ -124,7 +122,6 @@ export const lastSecretIndexSchema: AddSchemaRequest = {
     purpose_statement:
       "Metadata-only rollup of every LastSecret so list/search never full-scan the secret-bearing schema",
     schema_type: "Hash",
-    key: { hash_field: "key" },
     record_keys: { primary: { kind: "hash" }, alternates: {} },
     fields: ["key", "payload_json", "updated_at"],
     field_types: {

@@ -189,12 +189,14 @@ function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.s
   const matches = schemas.filter((value) => object(value).name === route);
   if (matches.length !== 1) throw new DeleteError("schema_owner_identity_ambiguous");
   const schema = object(matches[0]);
-  const key = object(schema.key);
+  const recordKeys = object(schema.record_keys);
+  const primary = object(recordKeys.primary);
   if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
       schema.state !== "Available" || typeof schema.name_claim_retired !== "boolean" ||
       schema.identity_hash !== configuredHash ||
-      schema.schema_type !== definition.schema_type || key.hash_field !== definition.key.hash_field ||
-      (key.range_field !== undefined && key.range_field !== null) ||
+      schema.schema_type !== definition.schema_type || primary.kind !== definition.record_keys.primary.kind ||
+      primary.allow_absent === true || (primary.range_type !== undefined && primary.range_type !== null) ||
+      Object.keys(object(recordKeys.alternates)).length !== 0 ||
       !Array.isArray(schema.fields) || schema.fields.length !== definition.fields.length ||
       new Set(schema.fields).size !== schema.fields.length ||
       !schema.fields.every((field) => typeof field === "string" && definition.fields.includes(field))) {
