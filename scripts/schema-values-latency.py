@@ -103,6 +103,14 @@ def command(binary, node, config, verb, *arguments, payload=None, allow_failure=
         # This control command never fetches value bytes. The output audit
         # still checks this file before any artifact upload.
         (config.parent / f"failed-{verb}.stderr").write_text(result.stderr)
+    if result.returncode and verb == "delete":
+        try:
+            receipt = json.loads(result.stdout)
+            status = {key: receipt[key] for key in ("code", "delete_outcome", "metadata_cleanup", "post_read")
+                      if isinstance(receipt.get(key), str) and re.fullmatch(r"[a-z_]{1,50}", receipt[key])}
+        except (ValueError, TypeError, AttributeError):
+            status = {}
+        save(config.parent / "delete-status.json", status)
     require(result.returncode == 0 or allow_failure, f"Actual CLI {verb} failed; no value is retained in this error")
     return result, elapsed
 
