@@ -24,8 +24,8 @@ contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
-New homes require LastDB API 13 or later (lastdb #803) and capability `owned_app_schemas_v1`.
-On API 13 and later, every schema owns its values. The secret records and the metadata summary use two such schemas.
+LastSecrets requires LastDB API 29 or later and explicit record keys.
+The secret records and metadata summaries use separate schemas that own their values.
 Canonical field definitions stay reusable. They do not share record values.
 These are separate record types, so this change adds no alternate key.
 A home on an older node moves to this release only by the home copy. See "Existing homes" below.
@@ -93,22 +93,23 @@ lastsecrets delete temporary-dev-invite temporary-dev-api-key
 
 The command accepts 1–63 distinct slugs and an optional `--config PATH`.
 It uses the current owner access and the same configured schema route as get and put.
-It reads the node API version with the schema list. It refuses a node older than API 13 with `home_copy_required` before it reads a key.
+It reads the node API version with the schema list and requires API 29 or later before reading keys.
 It selects the configured name first, or the saved hash when the name is absent.
 It requires one exact installed name, the correct owner, complete field names, a hash key, and state Available.
 It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
 A retired name claim remains valid for this exact installed route. The command never switches to another schema name.
-It reads fixed metadata fields only. It never reads or prints a secret value.
+LastDB returns complete records, including secret values, over the owner connection.
+LastSecrets keeps the selected metadata and record revision for deletion and emits a receipt containing only references and outcomes.
 Each read collects all selected keys and sends them as native keyed query batches of at most 64 keys, in parallel.
 A verified empty query result means the key is absent.
 A malformed, incomplete, or out-of-scope query result stops that path before a mutation.
-It sends one native Delete batch for every named key, even when its metadata projection is empty.
-These deletes have no version condition.
+It sends one native Delete batch for the named records that exist, using each observed record revision.
+An absent key needs no delete. A concurrent replacement causes a revision conflict.
 
 The command then reads the named keys and the metadata index rows again.
 It reads the root row and the bucket row of each named slug. It refuses a bucket row that holds a slug of another bucket.
 It removes index entries only for acknowledged slugs whose metadata remains absent.
-It sends one update for each changed row. Each update compares the exact previous payload of that row.
+It sends one complete replacement for each changed metadata row, conditioned on that row's observed revision.
 It keeps the content and order of every unrelated entry.
 It sends no index write when the rows or the relevant entries are absent.
 A final batch read observes the named keys and their metadata entries.
@@ -117,7 +118,7 @@ CAUTION: The Delete batch and the metadata repair are separate requests.
 A failure can leave a deleted secret with an old metadata entry.
 A concurrent write can recreate a named key or change the rollup.
 The command refuses ambiguous metadata and stops after a conflict or an uncertain write.
-Each metadata read describes one moment. It is not a transaction or a conditional-write token.
+The read and its conditional mutation are separate operations. The revision check rejects intervening changes.
 It does not retry automatically. Read the value-free JSON receipt before a separate cleanup attempt.
 Exit 0 means the Delete batch received an ack and the final metadata reads show absence.
 The result is an observed metadata state. It does not prove full-record or secret-value tip absence.

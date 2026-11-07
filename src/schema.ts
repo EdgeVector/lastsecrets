@@ -1,7 +1,6 @@
 export const OWNER_APP_ID = "lastsecrets";
 
-// LastDB API 13 (lastdb #803) is the first node on which every schema owns its
-// values. LastSecrets refuses an older node, so no per-schema check exists.
+// API 29 provides the complete-record protocol and explicit keys used here.
 export const OWNED_HOME_API_VERSION = 29;
 
 /** Whether the node API version guarantees that every schema owns its values. */
