@@ -28,7 +28,7 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   };
   const result = structuredClone(schema) as unknown as Record<string, unknown>;
   result.fields = schema.fields.map(rename);
-  for (const property of ["field_classifications", "field_interest_categories", "ref_fields", "transform_fields"]) {
+  for (const property of ["field_classifications", "field_interest_categories", "transform_fields"]) {
     const map = result[property];
     if (map && typeof map === "object" && !Array.isArray(map)) {
       result[property] = Object.fromEntries(Object.entries(map).map(([name, value]) => [rename(name), value]));
