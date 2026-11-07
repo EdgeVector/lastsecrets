@@ -103,6 +103,14 @@ def command(binary, node, config, verb, *arguments, payload=None, allow_failure=
         # This control command never fetches value bytes. The output audit
         # still checks this file before any artifact upload.
         (config.parent / f"failed-{verb}.stderr").write_text(result.stderr)
+    if result.returncode and verb == "delete":
+        try:
+            receipt = json.loads(result.stdout)
+            status = {key: receipt[key] for key in ("code", "delete_outcome", "metadata_cleanup", "post_read")
+                      if isinstance(receipt.get(key), str) and re.fullmatch(r"[a-z_]{1,50}", receipt[key])}
+        except (ValueError, TypeError, AttributeError):
+            status = {}
+        save(config.parent / "delete-status.json", status)
     require(result.returncode == 0 or allow_failure, f"Actual CLI {verb} failed; no value is retained in this error")
     return result, elapsed
 
@@ -128,6 +136,12 @@ def schemas(config):
     return aliases, record_schema, summary
 
 
+def query_records(node, queries):
+    if node.api_version >= 29:
+        queries = [{name: value for name, value in query.items() if name != "fields"} for query in queries]
+    return node.call("/api/queries/batch", {"queries": queries})[0]
+
+
 def snapshot(node, config, expected, absent=()):
     aliases, record_schema, summary = schemas(config)
     requests = [(record_schema, key, SECRET_FIELDS) for key in expected] + [(summary, key, SUMMARY_FIELDS) for key in SUMMARY_KEYS]
@@ -136,7 +150,7 @@ def snapshot(node, config, expected, absent=()):
                 "filter": {"HashKey": key}, "limit": 2, "offset": 0, "response_format":"full"} for schema, key, fields in requests]
     records, members = {}, {}
     for start in range(0, len(queries), 64):
-        reply = node.call("/api/queries/batch", {"queries": queries[start:start + 64]})[0]
+        reply = query_records(node, queries[start:start + 64])
         rows = reply.get("results")
         require(reply.get("count") == len(queries[start:start + 64]) and isinstance(rows, list), "The snapshot batch is incomplete")
         require(len(rows) == len(queries[start:start + 64]), "The snapshot batch count differs")
@@ -189,23 +203,31 @@ def move_to_root(node, config, slugs):
     name = lambda field: aliases.get(summary, {}).get(field, field)
     queries = [{"schema_name": summary, "fields": [name(field) for field in SUMMARY_FIELDS],
                 "filter": {"HashKey": key}, "limit": 2, "offset": 0} for key in SUMMARY_KEYS]
-    reply = node.call("/api/queries/batch", {"queries": queries})[0]
+    reply = query_records(node, queries)
     require(reply.get("count") == len(queries) and len(reply.get("results", [])) == len(queries),
             "The summary batch is incomplete")
-    rows = {}
+    rows, revisions = {}, {}
     for key, item in zip(SUMMARY_KEYS, reply["results"]):
         require(item.get("status") == 200 and item["response"].get("has_more") is False, "A summary read is incomplete")
         if item["response"]["results"]:
-            rows[key] = json.loads(item["response"]["results"][0]["fields"][name("payload_json")])
+            row = item["response"]["results"][0]
+            rows[key] = json.loads(row["fields"][name("payload_json")])
+            revisions[key] = row.get("revision")
     require(SUMMARY_ROOT not in rows, "A fresh home of this app already has a root summary row")
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     wanted, moved, mutations = set(slugs), [], []
 
     def mutation(key, mutation_type, entries):
-        return {"type": "mutation", "schema": summary, "mutation_type": mutation_type,
-                "key_value": {"hash": key, "range": None},
-                "fields_and_values": {name("key"): key, name("updated_at"): now,
-                                      name("payload_json"): json.dumps(entries, separators=(",", ":"))}}
+        fields = {name("key"): key, name("updated_at"): now,
+                  name("payload_json"): json.dumps(entries, separators=(",", ":"))}
+        base = {"type": "mutation", "schema": summary, "key_value": {"hash": key, "range": None}}
+        if node.api_version < 29:
+            return {**base, "mutation_type": mutation_type, "fields_and_values": fields}
+        revision = revisions.get(key)
+        require(mutation_type == "create" or isinstance(revision, str), "The root move lacks a record revision")
+        expected = {"type": "absent"} if mutation_type == "create" else {"type": "revision", "revision": revision}
+        return {**base, "mutation_type": "create" if mutation_type == "create" else "replace",
+                "record": fields, "alternates": {}, "expected": expected}
     for key, entries in rows.items():
         kept = [entry for entry in entries if entry["slug"] not in wanted]
         if len(kept) != len(entries):
@@ -263,10 +285,11 @@ def node_api_version(node):
 def arm(args, Node, cleanup, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
-    # Both arms run the same nightly daemon; only the app differs.
     candidate = label == "candidate"
     binary = args.candidate if candidate else args.baseline
-    node = Node(args.daemon, args.daemon_revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
+    daemon, revision, tag = ((args.daemon, args.daemon_revision, args.daemon_tag) if candidate
+                             else (args.before_daemon, args.before_revision, args.before_tag))
+    node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
                 environment={"LASTDB_SELF_METRICS_TO_DB":"false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED":"false", "LASTDB_TTL_SWEEP":"0"})
     config = output / "config.json"
@@ -353,7 +376,7 @@ def arm(args, Node, cleanup, label, pair):
             for operation in OPERATIONS), "The CLI observations do not match every timed sample")
         result = {"label":label,"pair":pair,"samples_ms":samples,"seed_records":args.records,"value_bytes":4096,
                   "remaining":len(expected),"unchanged_seed_records":len(before) - 1,"repeat_setup":candidate,
-                  "daemon_revision":args.daemon_revision,"daemon_tag":args.daemon_tag,
+                  "daemon_revision":revision,"daemon_tag":tag,
                   "home_format":home["format"],"api_version":home["api_version"],"fresh_home":True,
                   "reopen":True,"batch_delete":True,"disk":node.disk_breakdown(),
                   "cli_observations": {"count":len(observations),"sha256":hashlib.sha256(
@@ -367,8 +390,10 @@ def arm(args, Node, cleanup, label, pair):
 def render(args, summary):
     observed = sorted({(item["home_format"], item["api_version"]) for item in summary["arms"]}, key=str)
     lines = ["## LastSecrets fresh-home CLI latency", "",
-             f"Old app `{args.baseline_revision}` and new app `{args.candidate_revision}` both run the latest lastdb nightly "
-             f"`{args.daemon_tag}` (source `{args.daemon_revision}`).",
+             f"Before app `{args.baseline_revision}` uses `{args.before_tag}` (`{args.before_revision}`). "
+             f"After app `{args.candidate_revision}` uses `{args.daemon_tag}` (`{args.daemon_revision}`).",
+             ("The comparison measures the app change only." if args.before_revision == args.daemon_revision else
+              "This comparison measures the app and daemon release transition together."),
              "Observed home format and API: " + ", ".join(f"format {home} / API {api}" for home, api in observed) + ".",
              f"Two balanced AB/BA pairs use {args.records} seed records and 4096 bytes per value, plus equal timed creates.",
              f"Each operation retains {args.records} actual CLI samples per arm.",
@@ -408,9 +433,9 @@ def render(args, summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("baseline", "candidate", "daemon", "lastdb-source", "output"):
+    for name in ("baseline", "candidate", "daemon", "before-daemon", "lastdb-source", "output"):
         parser.add_argument("--" + name, type=Path, required=name == "output")
-    for name in ("baseline-revision", "candidate-revision", "daemon-revision", "daemon-tag"):
+    for name in ("baseline-revision", "candidate-revision", "daemon-revision", "daemon-tag", "before-revision", "before-tag"):
         parser.add_argument("--" + name)
     parser.add_argument("--records", type=int, default=64)
     parser.add_argument("--audit-only", action="store_true")
@@ -423,11 +448,13 @@ def main():
         audit_output(args.output, args.records)
         return
     require(all(getattr(args,name) for name in ("baseline", "candidate", "daemon", "lastdb_source",
-                "baseline_revision", "candidate_revision", "daemon_revision", "daemon_tag")), "All exact source and program inputs are required")
+                "baseline_revision", "candidate_revision", "daemon_revision", "daemon_tag",
+                "before_daemon", "before_revision", "before_tag")), "All exact source and program inputs are required")
     require(all(re.fullmatch(r"[a-f0-9]{40}", getattr(args,name)) for name in
-                ("baseline_revision", "candidate_revision", "daemon_revision")), "Exact source revisions are required")
-    require(re.fullmatch(r"nightly-[0-9]{8}-[a-f0-9]{9}", args.daemon_tag) and args.daemon_tag.endswith(args.daemon_revision[:9]),
-            "The nightly tag does not name the daemon source revision")
+                ("baseline_revision", "candidate_revision", "daemon_revision", "before_revision")), "Exact source revisions are required")
+    for tag, revision in ((args.before_tag, args.before_revision), (args.daemon_tag, args.daemon_revision)):
+        require(re.fullmatch(rf"nightly-[0-9]{{8}}-{revision[:9]}", tag),
+                "Each nightly tag must name the selected daemon source revision")
     require(subprocess.check_output(["git", "-C", str(args.lastdb_source), "rev-parse", "HEAD"], text=True).strip()
             == args.daemon_revision, "The actual daemon support source differs")
     require(not args.output.exists() and args.output.parent.resolve().is_relative_to(runner), "A fresh runner output path is required")
@@ -439,7 +466,7 @@ def main():
     import cleanup
     Node = nightly_node(Node)
     summary = {"complete":False,"sources":{name:str(item) for name,item in vars(args).items()},"arms":[],
-               "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon")}}
+               "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon","before_daemon")}}
     try:
         for pair, order in enumerate((("baseline","candidate"),("candidate","baseline"))):
             for label in order:
