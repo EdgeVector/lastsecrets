@@ -20,10 +20,11 @@ export type ExactRead = { schema: string; key: string; fields: string[] };
 export type BatchMutation = {
   type: "mutation";
   schema: string;
-  fields_and_values: ObjectRecord;
+  record: ObjectRecord;
   key_value: { hash: string; range: null };
-  mutation_type: "delete" | "update";
-  expected?: { type: "value"; field: "payload_json"; value: string };
+  alternates: Record<string, never>;
+  mutation_type: "delete" | "replace";
+  expected: { type: "revision"; revision: string };
 };
 export type NativeBatchClient = {
   schemas(): Promise<unknown>;
@@ -89,7 +90,7 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
     // Bounded reads share the normal owner transport.
     const reply = await send("POST", "/api/queries/batch", {
       queries: reads.map((read) => ({
-        schema_name: read.schema, fields: read.fields, filter: { HashKey: read.key }, limit: 2, offset: 0,
+        schema_name: read.schema, filter: { HashKey: read.key }, limit: 2, offset: 0,
       })),
     });
     if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
@@ -145,10 +146,15 @@ function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
   const row = object(reply.results[0]);
   const key = object(row.key);
   const fields = object(row.fields);
-  if (key.hash !== read.key || key.range !== null || Object.keys(fields).some((field) => !read.fields.includes(field))) {
+  if (key.hash !== read.key || key.range !== null ||
+      typeof row.revision !== "string" || !/^[a-f0-9]{64}$/.test(row.revision)) {
     throw new DeleteError("key_read_scope_mismatch");
   }
-  return { fields, key: { hash: read.key, range: null } };
+  return {
+    fields: Object.fromEntries(read.fields.filter((field) => Object.hasOwn(fields, field)).map((field) => [field, fields[field]])),
+    key: { hash: read.key, range: null },
+    revision: row.revision,
+  };
 }
 
 /** `version` is the `GET /api/version` reply. Delete runs only on a node that owns every schema's values. */
@@ -183,12 +189,14 @@ function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.s
   const matches = schemas.filter((value) => object(value).name === route);
   if (matches.length !== 1) throw new DeleteError("schema_owner_identity_ambiguous");
   const schema = object(matches[0]);
-  const key = object(schema.key);
+  const recordKeys = object(schema.record_keys);
+  const primary = object(recordKeys.primary);
   if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
       schema.state !== "Available" || typeof schema.name_claim_retired !== "boolean" ||
       schema.identity_hash !== configuredHash ||
-      schema.schema_type !== definition.schema_type || key.hash_field !== definition.key.hash_field ||
-      (key.range_field !== undefined && key.range_field !== null) ||
+      schema.schema_type !== definition.schema_type || primary.kind !== definition.record_keys.primary.kind ||
+      primary.allow_absent === true || (primary.range_type !== undefined && primary.range_type !== null) ||
+      Object.keys(object(recordKeys.alternates)).length !== 0 ||
       !Array.isArray(schema.fields) || schema.fields.length !== definition.fields.length ||
       new Set(schema.fields).size !== schema.fields.length ||
       !schema.fields.every((field) => typeof field === "string" && definition.fields.includes(field))) {
@@ -219,7 +227,7 @@ export function absentSlugs(rows: (QueryRow | null)[], slugs: string[]): string[
   });
 }
 const METADATA_ENTRY_FIELDS = ["slug", "ref", "label", "provider", "purpose", "environment", "createdAt", "updatedAt"];
-type Rollup = { key: string; payload: string; entries: ObjectRecord[] };
+type Rollup = { key: string; revision: string; entries: ObjectRecord[] };
 /** The index rows of {@link deleteReads}, in {@link deleteIndexKeys} order. An absent row is null. */
 export function strictRollups(rows: (QueryRow | null)[], slugs: string[]): (Rollup | null)[] {
   const keys = deleteIndexKeys(slugs);
@@ -251,12 +259,12 @@ function strictRollup(row: QueryRow | null, key: string): Rollup | null {
     seen.add(slug);
     return entry;
   });
-  return { key, payload: row.fields.payload_json, entries };
+  return { key, revision: row.revision, entries };
 }
 function validTime(value: unknown): boolean {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value));
 }
-/** One update per changed index row, each conditioned on the exact previous payload. */
+/** One complete replacement per changed index row, guarded by its observed revision. */
 export function rollupRepairs(schema: string, rollups: (Rollup | null)[], absent: string[]): BatchMutation[] {
   const removable = new Set(absent);
   const updatedAt = new Date().toISOString();
@@ -265,9 +273,10 @@ export function rollupRepairs(schema: string, rollups: (Rollup | null)[], absent
     const kept = rollup.entries.filter((entry) => !removable.has(entry.slug as string));
     if (kept.length === rollup.entries.length) return [];
     return [{
-      type: "mutation", schema, mutation_type: "update", key_value: { hash: rollup.key, range: null },
-      fields_and_values: { payload_json: JSON.stringify(kept), updated_at: updatedAt },
-      expected: { type: "value", field: "payload_json", value: rollup.payload },
+      type: "mutation", schema, mutation_type: "replace", key_value: { hash: rollup.key, range: null },
+      alternates: {},
+      record: { key: rollup.key, payload_json: JSON.stringify(kept), updated_at: updatedAt },
+      expected: { type: "revision", revision: rollup.revision },
     }];
   });
 }

@@ -71,10 +71,15 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
     strictRollups(before, slugs);
     // An uncertain request stops this sequence. Never retry a mutation here.
     progress.delete_outcome = "unknown";
-    await client.nativeBatch.mutate(slugs.map((slug) => ({
-      type: "mutation", schema: schemas.secret, mutation_type: "delete",
-      fields_and_values: {}, key_value: { hash: slug, range: null },
-    })));
+    const deletes = slugs.flatMap((slug, index) => {
+      const row = before[index];
+      return row ? [{
+        type: "mutation" as const, schema: schemas.secret, mutation_type: "delete" as const,
+        record: {}, key_value: { hash: slug, range: null }, alternates: {},
+        expected: { type: "revision" as const, revision: row.revision },
+      }] : [];
+    });
+    if (deletes.length > 0) await client.nativeBatch.mutate(deletes);
     progress.delete_outcome = "acknowledged";
     // Fresh reads retain metadata for an observed recreated slug and current unrelated entries.
     const fresh = await client.nativeBatch.readKeys(reads);
@@ -150,7 +155,7 @@ export async function putSecret(
 
   try {
     if (existing) {
-      await client.updateRecord({ schemaHash: schemaId(config), keyHash: input.slug, fields });
+      await client.updateRecord({ schemaHash: schemaId(config), keyHash: input.slug, fields, revision: existing.revision });
     } else {
       await client.createRecord({ schemaHash: schemaId(config), keyHash: input.slug, fields });
     }
@@ -340,7 +345,8 @@ function indexSchemaId(config: Pick<Config, "indexSchemaHash" | "indexSchemaName
 
 type IndexPatch = {
   bucket: string;
-  bucketExists: boolean;
+  bucketRevision: string | null;
+  rootRevision: string | null;
   bucketPayload: string;
   /** The root payload without this slug, or null when the root row does not hold it. */
   rootPayload: string | null;
@@ -373,7 +379,8 @@ function planIndexPatch(
   const rootKept = rootItems?.filter((item) => itemSlug(item) !== meta.slug);
   return {
     bucket,
-    bucketExists: row !== null,
+    bucketRevision: row?.revision ?? null,
+    rootRevision: root?.revision ?? null,
     bucketPayload,
     rootPayload: rootItems && rootKept && rootKept.length !== rootItems.length ? JSON.stringify(rootKept) : null,
   };
@@ -386,18 +393,19 @@ async function writeIndexPatch(
   now: string,
 ): Promise<void> {
   const fields = { key: patch.bucket, payload_json: patch.bucketPayload, updated_at: now };
-  if (patch.bucketExists) {
-    await client.updateRecord({ schemaHash: indexHash, keyHash: patch.bucket, fields });
+  if (patch.bucketRevision !== null) {
+    await client.updateRecord({ schemaHash: indexHash, keyHash: patch.bucket, fields, revision: patch.bucketRevision });
   } else {
     await client.createRecord({ schemaHash: indexHash, keyHash: patch.bucket, fields });
   }
   // Remove the root entry only after the bucket write. A failure between the
   // two writes leaves the entry in both rows (readers take the bucket entry),
   // never in neither.
-  if (patch.rootPayload !== null) {
+  if (patch.rootPayload !== null && patch.rootRevision !== null) {
     await client.updateRecord({
       schemaHash: indexHash,
       keyHash: ALL_SECRETS_INDEX_KEY,
+      revision: patch.rootRevision,
       fields: { key: ALL_SECRETS_INDEX_KEY, payload_json: patch.rootPayload, updated_at: now },
     });
   }

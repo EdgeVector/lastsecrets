@@ -18,8 +18,11 @@
       "descriptive_name": "LastSecret",
       "purpose_statement": "Local secret record whose raw value is intentionally excluded from automatic search indexes",
       "schema_type": "Hash",
-      "key": {
-        "hash_field": "secret_locator_slug"
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "fields": [
         "secret_locator_slug",
@@ -124,8 +127,11 @@
       "descriptive_name": "LastSecretIndex",
       "purpose_statement": "Metadata-only rollup of every LastSecret so list/search never full-scan the secret-bearing schema",
       "schema_type": "Hash",
-      "key": {
-        "hash_field": "secret_metadata_bucket_key"
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "fields": [
         "secret_metadata_bucket_key",

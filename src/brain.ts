@@ -8,15 +8,10 @@
 // fields and rewrites them in place.
 
 import {
-  LastDbClient as SdkLastDbClient,
   TransportError,
   UnexpectedResponseError,
-  capabilityStoreKey,
   httpTransport,
   udsTransport,
-  type CapabilityStore,
-  type JsonValue,
-  type QueryRow as SdkQueryRow,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
@@ -29,6 +24,10 @@ export type BrainRecord = {
   range: string | null;
   /** Raw field bag as returned by the node. */
   fields: Record<string, unknown>;
+  completeFields: Record<string, unknown>;
+  revision: string;
+  alternates: Record<string, unknown>;
+  metadata: Record<string, unknown>;
 };
 
 export type BrainKey = {
@@ -42,18 +41,10 @@ export type BrainClient = {
   /** Read one live record by its exact key. */
   queryByKey(schema: string, key: BrainKey, fields: string[]): Promise<BrainRecord | null>;
   /** Replace the field bag for a single record (targeted update, not mass rewrite). */
-  updateRecord(schema: string, key: string, range: string | null, fields: Record<string, unknown>): Promise<void>;
+  updateRecord(schema: string, record: BrainRecord, fields: Record<string, unknown>): Promise<void>;
 };
 
 const LIST_PAGE_SIZE = 1000;
-const FBRAIN_APP_ID = "fbrain";
-const noopCapabilityStore: CapabilityStore = {
-  async store() {},
-  async load() {
-    return null;
-  },
-  async remove() {},
-};
 
 export function newBrainClient(opts: {
   nodeUrl?: string;
@@ -68,28 +59,6 @@ export function newBrainClient(opts: {
   const sdkTransport: SdkTransport = opts.transport ?? (isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
     : httpTransport(nodeUrl, defaultHeaders));
-  const sdkStoreKey = capabilityStoreKey(FBRAIN_APP_ID, sdkTransport.target);
-  let sdkClient: SdkLastDbClient | null = null;
-  const dataClient = (): SdkLastDbClient => {
-    sdkClient ??= new SdkLastDbClient(
-      FBRAIN_APP_ID,
-      sdkTransport,
-      noopCapabilityStore,
-      null,
-      sdkStoreKey,
-      sdkTransport.target,
-    );
-    return sdkClient;
-  };
-
-  const sdkDataPath = async <T>(fn: (client: SdkLastDbClient) => Promise<T>): Promise<T> => {
-    try {
-      return await fn(dataClient());
-    } catch (err) {
-      throw mapSdkError(err, nodeUrl, socketPath);
-    }
-  };
-
   const transportDataPath = async <T>(fn: () => Promise<T>): Promise<T> => {
     try {
       return await fn();
@@ -126,21 +95,47 @@ export function newBrainClient(opts: {
       });
     },
     async queryByKey(schema, key, fields) {
-      const filter: JsonValue = key.range === null
-        ? { HashKey: key.hash }
-        : { HashRangeKey: { hash: key.hash, range: key.range } };
-      const result = await sdkDataPath((client) => client.query(schema, { fields, filter }));
-      const row = result.rows[0];
-      return row ? sdkRowToBrainRecord(row) : null;
+      return transportDataPath(async () => {
+        const response = await sdkTransport.send("POST", "/api/query", { body: {
+          schema_name: schema, filter: { HashRangeKeys: [[key.hash, key.range ?? ""]] }, limit: 2,
+        } });
+        const reply = asRecord(response.body);
+        if (response.status !== 200 || reply?.ok === false || reply?.has_more !== false ||
+            !Array.isArray(reply.results) || reply.results.length > 1) {
+          throw new Error(`LastDB did not confirm the Brain record read (HTTP ${response.status}).`);
+        }
+        if (reply.results.length === 0) return null;
+        const row = asRecord(reply.results[0]);
+        const coordinate = asRecord(row?.key);
+        const completeFields = asRecord(row?.fields);
+        const alternates = asRecord(row?.alternates);
+        const revision = row?.revision;
+        if (coordinate?.hash !== key.hash || coordinate.range !== key.range || !completeFields || !alternates ||
+            typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+          throw new Error("LastDB returned a different or incomplete Brain record.");
+        }
+        return {
+          key: key.hash, range: key.range, revision, completeFields, alternates,
+          metadata: asRecord(row?.metadata) ?? {},
+          fields: Object.fromEntries(fields.filter((field) => Object.hasOwn(completeFields, field)).map((field) => [field, completeFields[field]])),
+        };
+      });
     },
-    async updateRecord(schema, key, range, fields) {
-      await sdkDataPath((client) =>
-        client.mutate(schema, {
-          mutationType: "update",
-          fields: fields as Record<string, JsonValue>,
-          key: { hash: key, range },
-        }),
-      );
+    async updateRecord(schema, record, fields) {
+      await transportDataPath(async () => {
+        const response = await sdkTransport.send("POST", "/api/mutation", { body: {
+          type: "mutation", schema, mutation_type: "replace", record: { ...record.completeFields, ...fields },
+          key_value: { hash: record.key, range: record.range }, alternates: record.alternates,
+          expected: { type: "revision", revision: record.revision },
+          source_file_name: record.metadata.source_file_name ?? null,
+          metadata: record.metadata.metadata ?? null, file: record.metadata.file ?? null,
+          durability: "durable",
+        } });
+        const revision = asRecord(response.body)?.record_revision;
+        if (response.status !== 200 || typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
+          throw new Error(`LastDB did not confirm the Brain record write (HTTP ${response.status}).`);
+        }
+      });
     },
   };
 }
@@ -176,19 +171,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function sdkRowToBrainRecord(row: SdkQueryRow): BrainRecord {
-  const keyValue = row.keyValue ?? renderedKeyToKeyValue(row.key);
-  return {
-    key: keyValue.hash ?? row.key,
-    range: keyValue.range,
-    fields: row.fields,
-  };
-}
-
-function renderedKeyToKeyValue(key: string): { hash: string; range: string | null } {
-  return { hash: key, range: null };
 }
 
 function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {

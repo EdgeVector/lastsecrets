@@ -2,7 +2,7 @@ export const OWNER_APP_ID = "lastsecrets";
 
 // LastDB API 13 (lastdb #803) is the first node on which every schema owns its
 // values. LastSecrets refuses an older node, so no per-schema check exists.
-export const OWNED_HOME_API_VERSION = 13;
+export const OWNED_HOME_API_VERSION = 29;
 
 /** Whether the node API version guarantees that every schema owns its values. */
 export const ownedHome = (apiVersion: number): boolean => apiVersion >= OWNED_HOME_API_VERSION;
@@ -27,7 +27,7 @@ export type SchemaDefinition = {
   descriptive_name: string;
   purpose_statement: string;
   schema_type: "Hash";
-  key: { hash_field: string };
+  record_keys: { primary: { kind: "hash" }; alternates: Record<string, never> };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -54,7 +54,7 @@ export const lastSecretSchema: AddSchemaRequest = {
     purpose_statement:
       "Local secret record whose raw value is intentionally excluded from automatic search indexes",
     schema_type: "Hash",
-    key: { hash_field: "slug" },
+    record_keys: { primary: { kind: "hash" }, alternates: {} },
     fields: [
       "slug",
       "label",
@@ -122,7 +122,7 @@ export const lastSecretIndexSchema: AddSchemaRequest = {
     purpose_statement:
       "Metadata-only rollup of every LastSecret so list/search never full-scan the secret-bearing schema",
     schema_type: "Hash",
-    key: { hash_field: "key" },
+    record_keys: { primary: { kind: "hash" }, alternates: {} },
     fields: ["key", "payload_json", "updated_at"],
     field_types: {
       key: "String",

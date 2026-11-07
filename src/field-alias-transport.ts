@@ -35,7 +35,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
   const result = {...value};
   const aliases = profile(value, profiles);
   if (aliases) {
-    for (const key of ["fields", "fields_and_values"]) {
+    for (const key of ["fields", "fields_and_values", "record"]) {
       const fields = value[key];
       if (Array.isArray(fields)) result[key] = fields.map((field) => typeof field === "string" ? rename(field, aliases, true) : field);
       else if (object(fields)) result[key] = renameObject(fields as ObjectValue, aliases, true);
