@@ -111,7 +111,9 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
       return (await Promise.all(chunks.map(readChunk))).flat();
     },
     async mutate(mutations) {
-      const reply = await send("POST", "/api/mutations/batch", { mutations });
+      const reply = await send("POST", "/api/mutations/batch", {
+        mutations: mutations.map((item) => ({ ...item, durability: "durable" })),
+      });
       const operations = object(reply.operations);
       const deleted = mutations.filter((item) => item.mutation_type === "delete").length;
       const updated = mutations.length - deleted;
@@ -120,8 +122,8 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
           reply.mutation_ids.some((id) => typeof id !== "string" || id.length === 0) ||
           new Set(reply.mutation_ids).size !== mutations.length ||
           operations.total !== mutations.length || operations.deleted !== deleted ||
-          operations.updated !== updated || operations.created !== 0 || operations.no_op !== 0 ||
-          (reply.durability !== "queued" && reply.durability !== "durable")) {
+          operations.updated !== updated || operations.created !== 0 ||
+          reply.durability !== "durable") {
         throw new DeleteError("mutation_reply_ambiguous");
       }
     },
