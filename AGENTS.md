@@ -31,7 +31,7 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 ## Schema-owned values (Tom, 2026-10-29)
 
 The secret schema and the metadata summary schema own their values.
-LastDB API 13 (lastdb #803) makes every schema own its values. The app refuses an older node.
+The app requires LastDB API 29 or later for complete records and explicit keys.
 These schemas hold different records. Do not combine them as alternate keys.
 Canonical field reuse supplies definitions only. It does not share record values.
 A home on an older node moves only by the home copy (EdgeVector/last-stack#377).

@@ -85,7 +85,7 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
     const fresh = await client.nativeBatch.readKeys(reads);
     const absent = absentSlugs(fresh, slugs);
     progress.metadata_absent_refs = absent.map(secretRef);
-    // One value-conditioned update for each index row that holds a removable entry.
+    // One revision-conditioned replacement for each index row with a removable entry.
     const repairs = rollupRepairs(schemas.index, strictRollups(fresh, slugs), absent);
     if (repairs.length > 0) {
       progress.metadata_cleanup = "unknown";
