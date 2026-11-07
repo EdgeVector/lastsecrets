@@ -2,15 +2,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
-  LastDbClient as SdkLastDbClient,
   TransportError,
   UnexpectedResponseError,
-  capabilityStoreKey,
   httpTransport,
   udsTransport,
-  type CapabilityStore,
-  type JsonValue,
-  type QueryRow as SdkQueryRow,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
@@ -23,6 +18,7 @@ import { newNativeBatchClient, type NativeBatchClient } from "./batch.ts";
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
+  revision: string;
 };
 
 export type LastDbClient = {
@@ -42,6 +38,7 @@ export type LastDbClient = {
     schemaHash: string;
     fields: Record<string, unknown>;
     keyHash: string;
+    revision: string;
   }): Promise<void>;
   queryByKey(opts: {
     schemaHash: string;
@@ -58,12 +55,6 @@ export type LastDbClient = {
     keys: readonly string[];
     fields: string[];
   }): Promise<(QueryRow | null)[]>;
-  queryAll(opts: {
-    schemaHash: string;
-    fields: string[];
-    /** Admin/offline unfiltered drain only — stamps X-LastDB-Allow-Full-Scan. */
-    allowFullScan?: boolean;
-  }): Promise<QueryRow[]>;
 };
 
 export class LastSecretsError extends Error {
@@ -81,7 +72,6 @@ export class LastSecretsError extends Error {
 type FetchInit = RequestInit & { unix?: string };
 type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 
-const QUERY_PAGE_SIZE = 1000;
 /** The native `/api/queries/batch` limit. */
 const BATCH_READ_LIMIT = 64;
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -93,13 +83,6 @@ const STALE_NODE_URLS: ReadonlySet<string> = new Set([
   "http://127.0.0.1:9001",
   "http://localhost:9001",
 ]);
-const noopCapabilityStore: CapabilityStore = {
-  async store() {},
-  async load() {
-    return null;
-  },
-  async remove() {},
-};
 
 export function defaultNodeUrl(): string {
   return process.env.LASTSECRETS_NODE_URL ?? DEFAULT_NODE_URL;
@@ -150,29 +133,7 @@ export function newLastDbClient(opts: {
   const sdkTransport: SdkTransport = fieldAliasTransport(isLoopbackNodeUrl(nodeUrl)
     ? udsTransport(socketPath, defaultHeaders)
     : httpTransport(nodeUrl, defaultHeaders), fieldProfiles);
-  const sdkStoreKey = capabilityStoreKey(OWNER_APP_ID, sdkTransport.target);
-  let sdkClient: SdkLastDbClient | null = null;
-  const dataClient = (): SdkLastDbClient => {
-    sdkClient ??= new SdkLastDbClient(
-      OWNER_APP_ID,
-      sdkTransport,
-      noopCapabilityStore,
-      null,
-      sdkStoreKey,
-      sdkTransport.target,
-    );
-    return sdkClient;
-  };
-
-  const sdkDataPath = async <T>(fn: (client: SdkLastDbClient) => Promise<T>): Promise<T> => {
-    try {
-      return await withTimeout(fn(dataClient()), queryTimeoutMs);
-    } catch (err) {
-      throw mapSdkError(err, nodeUrl, socketPath);
-    }
-  };
-
-  // The SDK has no batch read. The field-alias transport maps each query item.
+  // API 30 returns complete records. Project only inside this owner process.
   const readKeyBatch = async (
     schemaHash: string,
     keys: string[],
@@ -180,7 +141,7 @@ export function newLastDbClient(opts: {
   ): Promise<(QueryRow | null)[]> => {
     const body = {
       queries: keys.map((key) => ({
-        schema_name: schemaHash, fields, filter: { HashKey: key }, limit: 2, offset: 0,
+        schema_name: schemaHash, filter: { HashKey: key }, limit: 2, offset: 0,
       })),
     };
     let response;
@@ -213,11 +174,35 @@ export function newLastDbClient(opts: {
       const row = asObject(page.results[0]);
       const rowKey = asObject(row?.key);
       const rowFields = asObject(row?.fields);
-      if (!rowFields || rowKey?.hash !== key) {
+      const revision = row?.revision;
+      if (!rowFields || rowKey?.hash !== key || rowKey.range !== null ||
+          typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
         throw new LastSecretsError("batch_read_ambiguous", `LastDB returned another record for key ${key}.`);
       }
-      return { fields: rowFields, key: { hash: key, range: null } };
+      return {
+        fields: Object.fromEntries(fields.filter((field) => Object.hasOwn(rowFields, field)).map((field) => [field, rowFields[field]])),
+        key: { hash: key, range: null },
+        revision,
+      };
     });
+  };
+
+  const writeRecord = async (schema: string, hash: string, fields: Record<string, unknown>, revision?: string) => {
+    let response;
+    try {
+      response = await withTimeout(sdkTransport.send("POST", "/api/mutation", { body: {
+        type: "mutation", schema, record: fields, key_value: { hash, range: null }, alternates: {},
+        mutation_type: revision === undefined ? "create" : "replace",
+        expected: revision === undefined ? { type: "absent" } : { type: "revision", revision },
+        durability: "durable",
+      } }), queryTimeoutMs);
+    } catch (err) {
+      throw mapSdkError(err, nodeUrl, socketPath);
+    }
+    const written = asObject(response.body)?.record_revision;
+    if (response.status !== 200 || typeof written !== "string" || !/^[a-f0-9]{64}$/.test(written)) {
+      throw new LastSecretsError("record_write_unconfirmed", `LastDB did not confirm the record write (HTTP ${response.status}).`);
+    }
   };
 
   // Owner setup still uses node-specific endpoints that the app data SDK does
@@ -317,34 +302,13 @@ export function newLastDbClient(opts: {
       return {canonical:identity, schemaName:runtime};
     },
     async createRecord({ schemaHash, fields, keyHash }) {
-      await sdkDataPath((client) =>
-        client.mutate(schemaHash, {
-          mutationType: "create",
-          fields: fields as Record<string, JsonValue>,
-          key: { hash: keyHash, range: null },
-        }),
-      );
+      await writeRecord(schemaHash, keyHash, fields);
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
-      await sdkDataPath((client) =>
-        client.mutate(schemaHash, {
-          mutationType: "update",
-          fields: fields as Record<string, JsonValue>,
-          key: { hash: keyHash, range: null },
-        }),
-      );
+    async updateRecord({ schemaHash, fields, keyHash, revision }) {
+      await writeRecord(schemaHash, keyHash, fields, revision);
     },
     async queryByKey({ schemaHash, keyHash, fields }) {
-      const result = await sdkDataPath((client) =>
-        client.query(schemaHash, {
-          fields,
-          filter: { HashKey: keyHash },
-          limit: QUERY_PAGE_SIZE,
-          offset: 0,
-        }),
-      );
-      const rows = result.rows.map(sdkRowToQueryRow);
-      return rows.find((row) => row.key.hash === keyHash) ?? null;
+      return (await readKeyBatch(schemaHash, [keyHash], fields))[0] ?? null;
     },
     async queryByKeys({ schemaHash, keys, fields }) {
       const chunks: string[][] = [];
@@ -354,31 +318,7 @@ export function newLastDbClient(opts: {
       const replies = await Promise.all(chunks.map((chunk) => readKeyBatch(schemaHash, chunk, fields)));
       return replies.flat();
     },
-    async queryAll({ schemaHash, fields, allowFullScan }) {
-      const result = await sdkDataPath((client) =>
-        client.queryAll(
-          schemaHash,
-          { fields },
-          {
-            pageSize: QUERY_PAGE_SIZE,
-            ...(allowFullScan === true ? { allowFullScan: true } : {}),
-          },
-        ),
-      );
-      return result.rows.map(sdkRowToQueryRow);
-    },
   };
-}
-
-function sdkRowToQueryRow(row: SdkQueryRow): QueryRow {
-  return {
-    fields: row.fields,
-    key: row.keyValue ?? renderedKeyToHashKey(row.key),
-  };
-}
-
-function renderedKeyToHashKey(key: string): { hash: string | null; range: string | null } {
-  return { hash: key.length > 0 ? key : null, range: null };
 }
 
 function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {

@@ -239,7 +239,7 @@ export async function applyMigration(
 
     if (changed) {
       try {
-        await deps.brain.updateRecord(schema, record.key, record.range, updatedFields);
+        await deps.brain.updateRecord(schema, record, updatedFields);
         result.updatedRecords++;
       } catch (err) {
         result.errors.push({
