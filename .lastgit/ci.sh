@@ -22,7 +22,4 @@ for f in src/*.ts; do
   bun build "$f" --target=bun --outfile=/dev/null
 done
 
-echo "== artifact build =="
-bun run build
-
-echo "lastgit ci gate PASSED"
+echo "ci gate PASSED"

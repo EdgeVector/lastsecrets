@@ -1,13 +1,8 @@
-# Gate of record for EdgeVector/lastsecrets (GitHub, since 2026-09-30).
-# Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github,
-#        sop-github-artifact-app-migration.
+# Gate of record for EdgeVector/lastsecrets (GitHub).
 #
 # `ci-required` is the branch-protection check. It runs .lastgit/ci.sh
-# (shell syntax, typecheck, artifact build) unchanged. `publish` runs
-# on a push to main only, after the gate is green, and uploads the app registry
-# artifact `ht-artifact-<sha>`. `app registry refresh lastsecrets` on the Mac pulls
-# it (last-stack-github-artifact-pull), re-checks every digest, and promotes
-# the stable channel.
+# (shell syntax, frozen install, typecheck, per-file bun build).
+# `registry-commit` runs on a push to main after the gate is green.
 name: ci-required
 
 on:

@@ -55,7 +55,7 @@ const REDACTED = "<redacted>";
 
 type StorageConfig = Pick<
   Config,
-  "schemaHash" | "schemaName" | "schemaFieldAliases" | "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases"
+  "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName"
 >;
 
 /** Intentional exact-key deletion. Metadata repair is a separate, conditional write. */
@@ -63,8 +63,8 @@ export async function deleteSecrets(client: LastDbClient, config: StorageConfig,
   validateDeleteSlugs(slugs);
   const progress = deleteProgress(slugs);
   try {
-    const [catalog, version] = await Promise.all([client.nativeBatch.schemas(), client.nativeBatch.version()]);
-    const schemas = resolveDeleteSchemas(catalog, config, version);
+    const catalog = await client.nativeBatch.schemas();
+    const schemas = resolveDeleteSchemas(catalog, config);
     const reads = deleteReads(schemas, slugs);
     const before = await client.nativeBatch.readKeys(reads);
     absentSlugs(before, slugs);
@@ -169,7 +169,7 @@ export async function putSecret(
 
 export async function getSecret(
   client: LastDbClient,
-  config: Pick<Config, "schemaHash" | "schemaName" | "schemaFieldAliases">,
+  config: Pick<Config, "schemaHash">,
   slug: string,
 ): Promise<LastSecret> {
   secretRef(slug);
@@ -193,7 +193,7 @@ export async function getSecret(
 
 export async function listSecrets(
   client: LastDbClient,
-  config: Pick<Config, "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases">,
+  config: Pick<Config, "indexSchemaHash">,
 ): Promise<SecretMetadata[]> {
   // One batch read of every index row. A later row wins for a slug, so a
   // bucket entry wins over a root entry (see index-rows.ts).
@@ -211,7 +211,7 @@ export async function listSecrets(
 
 export async function searchSecrets(
   client: LastDbClient,
-  config: Pick<Config, "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases">,
+  config: Pick<Config, "indexSchemaHash">,
   term: string,
 ): Promise<SecretMetadata[]> {
   const needle = term.trim().toLowerCase();
@@ -324,17 +324,12 @@ function redactError(err: unknown, secretValue: string): Error {
   return new Error(redactKnownSecretWords(redacted));
 }
 
-function schemaId(config: Pick<Config, "schemaHash" | "schemaName" | "schemaFieldAliases">): string {
-  if (config.schemaFieldAliases?.[config.schemaHash]) return config.schemaHash;
-  return config.schemaName && config.schemaName.length > 0 ? config.schemaName : config.schemaHash;
+function schemaId(config: Pick<Config, "schemaHash">): string {
+  return config.schemaHash;
 }
 
-function indexSchemaId(config: Pick<Config, "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases">): string {
-  const id = config.indexSchemaHash && config.schemaFieldAliases?.[config.indexSchemaHash]
-    ? config.indexSchemaHash :
-    config.indexSchemaName && config.indexSchemaName.length > 0
-      ? config.indexSchemaName
-      : config.indexSchemaHash;
+function indexSchemaId(config: Pick<Config, "indexSchemaHash">): string {
+  const id = config.indexSchemaHash;
   if (!id) {
     throw new Error(
       "LastSecretIndex schema is not resolved on this config; run `lastsecrets init` first.",

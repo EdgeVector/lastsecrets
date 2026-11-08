@@ -1,10 +1,7 @@
 export const OWNER_APP_ID = "lastsecrets";
 
-// API 29 provides the complete-record protocol and explicit keys used here.
-export const OWNED_HOME_API_VERSION = 29;
-
-/** Whether the node API version guarantees that every schema owns its values. */
-export const ownedHome = (apiVersion: number): boolean => apiVersion >= OWNED_HOME_API_VERSION;
+/** Minimum LastDB API for complete records and explicit keys. */
+export const MIN_API_VERSION = 29;
 
 /** `api_version` from a `GET /api/version` reply (bare or in a `data` envelope); 0 when absent. */
 export function apiVersionOf(reply: unknown): number {

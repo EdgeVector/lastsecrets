@@ -8,7 +8,6 @@ import { ConfigError, defaultConfigPath, readConfig, writeConfig, type Config } 
 import {
   defaultNodeUrl,
   newLastDbClient,
-  normalizeNodeUrl,
   resolveSocketPath,
 } from "./lastdb.ts";
 import { captureSentryException, initSentry } from "./observability/sentry.ts";
@@ -22,15 +21,7 @@ import {
   putSecret,
   searchSecrets,
 } from "./storage.ts";
-import { newBrainClient } from "./brain.ts";
-import {
-  applyMigration,
-  planMigration,
-  renderMigrationLog,
-  type ScanTarget,
-} from "./migrate.ts";
 import { guardPaths, renderGuardReport } from "./guard.ts";
-import { writeFileSync } from "node:fs";
 
 type Io = {
   stdout: Pick<typeof process.stdout, "write">;
@@ -69,18 +60,17 @@ export async function run(
     }
     if (command === "init") {
       const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
-      const nodeUrl = normalizeNodeUrl(opts.nodeUrl ?? defaultNodeUrl());
+      const nodeUrl = opts.nodeUrl ?? defaultNodeUrl();
       const socketPath = resolveSocketPath(opts.socketPath);
       const configPath = opts.config ?? defaultConfigPath();
       let existing: Config | null = null;
       try { existing = readConfig(configPath); } catch (error) {
         if (!(error instanceof ConfigError) || error.code !== "config_missing") throw error;
       }
-      const preflight = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath });
+      const preflight = cliDeps.newClient({ socketPathOverride: socketPath });
       const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ nodeUrl, socketPathOverride: socketPath, userHash,
+      const client = cliDeps.newClient({ socketPathOverride: socketPath,
         schemaFieldAliases:existing?.schemaFieldAliases,
-        canonicalVocabulary:existing ? Boolean(existing.schemaFieldAliases) : "auto",
       });
       // The node declares both owned schemas and returns their definition
       // identities. LastSecrets never writes to Schema Service itself.
@@ -116,7 +106,7 @@ export async function run(
       const { slugs, configPath } = parseDeleteArgs([arg, ...rest].filter((v): v is string => v !== undefined));
       const config = loadStorageConfig(configPath);
       const client = cliDeps.newClient({
-        nodeUrl: config.nodeUrl, socketPath: config.nodeSocketPath, userHash: config.userHash, schemaFieldAliases:config.schemaFieldAliases,
+        socketPath: config.nodeSocketPath, schemaFieldAliases:config.schemaFieldAliases,
       });
       // This path never declares schemas, grants access, rewrites config, or retries.
       deleteCommandStarted = true;
@@ -183,48 +173,6 @@ export async function run(
       );
       const slice = buildAdminSecretsSlice(listed);
       io.stdout.write(`${JSON.stringify(slice, null, 2)}\n`);
-      return 0;
-    }
-
-    if (command === "migrate") {
-      const opts = parseOptions([arg, ...rest].filter((v): v is string => v !== undefined));
-      if (!opts.schema) throw new Error("migrate requires --schema NAME (repeatable via comma)");
-      if (opts.fields.length === 0) {
-        throw new Error("migrate requires --fields FIELD[,FIELD...] to scan");
-      }
-      const rawConfig = loadStorageConfig(opts.config);
-      const secrets = cliDeps.newClient({
-        nodeUrl: rawConfig.nodeUrl,
-        socketPath: rawConfig.nodeSocketPath,
-        userHash: rawConfig.userHash, schemaFieldAliases:rawConfig.schemaFieldAliases,
-      });
-      const config = rawConfig;
-      const brain = newBrainClient({
-        nodeUrl: config.nodeUrl,
-        socketPath: config.nodeSocketPath,
-        userHash: config.userHash,
-      });
-      const targets: ScanTarget[] = opts.schema
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-        .map((schema) => ({ schema, fields: opts.fields }));
-      const deps = { brain, secrets, secretsConfig: config };
-      const plan = await planMigration(deps, targets);
-
-      const mode = opts.apply ? "apply" : "plan";
-      let applied;
-      if (opts.apply) {
-        applied = await applyMigration(deps, plan, targets);
-      }
-      const log = renderMigrationLog(plan, mode, applied);
-      if (opts.log) {
-        writeFileSync(opts.log, log, { encoding: "utf8", mode: 0o600 });
-        io.stdout.write(`migration log written to ${opts.log}\n`);
-      } else {
-        io.stdout.write(`${log}\n`);
-      }
-      if (applied && applied.errors.length > 0) return 1;
       return 0;
     }
 
@@ -312,9 +260,7 @@ async function withStorage<T>(
 ): Promise<T> {
   const config = loadStorageConfig(configPath);
   const client = deps.newClient({
-    nodeUrl: config.nodeUrl,
     socketPath: config.nodeSocketPath,
-    userHash: config.userHash,
     schemaFieldAliases:config.schemaFieldAliases,
   });
   return fn(client, config);
@@ -329,22 +275,14 @@ type Options = {
   purpose?: string;
   env?: string;
   valueStdin?: boolean;
-  schema?: string;
-  fields: string[];
-  apply?: boolean;
-  log?: string;
 };
 
 function parseOptions(args: string[]): Options {
-  const opts: Options = { fields: [] };
+  const opts: Options = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--value-stdin") {
       opts.valueStdin = true;
-      continue;
-    }
-    if (arg === "--apply") {
-      opts.apply = true;
       continue;
     }
     if (!arg.startsWith("--")) throw new Error(`unexpected argument: ${arg}`);
@@ -360,13 +298,6 @@ function parseOptions(args: string[]): Options {
     else if (key === "provider") opts.provider = value;
     else if (key === "purpose") opts.purpose = value;
     else if (key === "env") opts.env = value;
-    else if (key === "schema") opts.schema = value;
-    else if (key === "fields") {
-      opts.fields = value
-        .split(",")
-        .map((f) => f.trim())
-        .filter((f) => f.length > 0);
-    } else if (key === "log") opts.log = value;
     else throw new Error(`unknown option: --${key}`);
   }
   return opts;
@@ -408,7 +339,6 @@ function usage(): string {
     "       lastsecrets list",
     "       lastsecrets search <term>",
     "       lastsecrets admin-slice",
-    "       lastsecrets migrate --schema NAME[,NAME] --fields FIELD[,FIELD] [--apply] [--log PATH]",
     "       lastsecrets guard [PATH...]",
     "",
     "init     — declare schema-owned values through Mini and pin definition identities.",

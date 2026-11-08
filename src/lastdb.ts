@@ -4,12 +4,11 @@ import { join } from "node:path";
 import {
   TransportError,
   UnexpectedResponseError,
-  httpTransport,
   udsTransport,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
-import { OWNER_APP_ID, type SchemaDefinition } from "./schema.ts";
+import { type SchemaDefinition } from "./schema.ts";
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { ownedDeclaration, requireOwnedHome } from "./schema-mode.ts";
 import { fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
@@ -22,7 +21,7 @@ export type QueryRow = {
 };
 
 export type LastDbClient = {
-  readonly schemaFieldAliases?: FieldAliasProfiles;
+  readonly schemaFieldAliases: FieldAliasProfiles;
   nativeBatch: NativeBatchClient;
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(
@@ -75,33 +74,18 @@ type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
 /** The native `/api/queries/batch` limit. */
 const BATCH_READ_LIMIT = 64;
 const SOCKET_FILE_NAME = "folddb.sock";
-// Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback *marker*
-// (hostname only) so clients select socket transport via isLoopbackNodeUrl —
-// it is NOT a TCP endpoint. Retired control plane :9001 must never be the default.
+// Local Mini is Unix-socket only. DEFAULT_NODE_URL is the loopback marker stored in config.
 const DEFAULT_NODE_URL = "http://127.0.0.1";
-const STALE_NODE_URLS: ReadonlySet<string> = new Set([
-  "http://127.0.0.1:9001",
-  "http://localhost:9001",
-]);
 
 export function defaultNodeUrl(): string {
   return process.env.LASTSECRETS_NODE_URL ?? DEFAULT_NODE_URL;
-}
-
-/** Heal retired TCP :9001 URLs to the socket-only loopback marker. */
-export function normalizeNodeUrl(url: string | undefined | null): string {
-  const raw = (url ?? "").trim().replace(/\/$/, "");
-  if (!raw || STALE_NODE_URLS.has(raw)) return DEFAULT_NODE_URL;
-  return raw;
 }
 
 export function resolveSocketPath(override?: string, configValue?: string): string {
   if (override && override.length > 0) return override;
   for (const name of [
     "LASTSECRETS_SOCKET_PATH",
-    "FOLDDB_SOCKET_PATH",
-    "FOLDDB_SOCK",
-    "FBRAIN_FOLDDB_SOCKET",
+    "LASTDB_SOCKET_PATH",
   ]) {
     const value = process.env[name];
     if (value && value.length > 0) return value;
@@ -112,27 +96,21 @@ export function resolveSocketPath(override?: string, configValue?: string): stri
 }
 
 export function newLastDbClient(opts: {
-  nodeUrl?: string;
-  userHash?: string;
   socketPath?: string;
   socketPathOverride?: string;
   fetchImpl?: FetchLike;
   queryTimeoutMs?: number;
   schemaFieldAliases?: FieldAliasProfiles;
-  canonicalVocabulary?: boolean | "auto";
 } = {}): LastDbClient {
-  const nodeUrl = stripTrailingSlash(opts.nodeUrl ?? defaultNodeUrl());
   const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
   const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
   const queryTimeoutMs = opts.queryTimeoutMs ?? 30_000; // 30s default timeout
   const defaultHeaders: Record<string, string> = {
     "X-LastDB-Client": "lastsecrets",
-    ...(opts.userHash ? { "X-User-Hash": opts.userHash } : {}),
   };
   const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
-  const sdkTransport: SdkTransport = fieldAliasTransport(isLoopbackNodeUrl(nodeUrl)
-    ? udsTransport(socketPath, defaultHeaders)
-    : httpTransport(nodeUrl, defaultHeaders), fieldProfiles);
+  const sdkTransport: SdkTransport = fieldAliasTransport(
+    udsTransport(socketPath, defaultHeaders), fieldProfiles);
   // API 30 returns complete records. Project only inside this owner process.
   const readKeyBatch = async (
     schemaHash: string,
@@ -149,7 +127,7 @@ export function newLastDbClient(opts: {
       response = await withTimeout(sdkTransport.send("POST", "/api/queries/batch", { body }), queryTimeoutMs);
     } catch (err) {
       if (err instanceof LastSecretsError) throw err;
-      throw mapSdkError(err, nodeUrl, socketPath);
+      throw mapSdkError(err, socketPath);
     }
     if (response.status !== 200) {
       throw new LastSecretsError(
@@ -197,7 +175,7 @@ export function newLastDbClient(opts: {
         durability: "durable",
       } }), queryTimeoutMs);
     } catch (err) {
-      throw mapSdkError(err, nodeUrl, socketPath);
+      throw mapSdkError(err, socketPath);
     }
     const written = asObject(response.body)?.record_revision;
     if (response.status !== 200 || typeof written !== "string" || !/^[a-f0-9]{64}$/.test(written)) {
@@ -213,22 +191,20 @@ export function newLastDbClient(opts: {
     body?: unknown,
   ): Promise<unknown> => {
     const headers: Record<string, string> = {};
-    if (opts.userHash) headers["X-User-Hash"] = opts.userHash;
     let requestBody: string | undefined;
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       requestBody = JSON.stringify(body);
     }
 
-    const socket = isLoopbackNodeUrl(nodeUrl) ? socketPath : null;
-    const url = socket ? `http://localhost${path}` : `${nodeUrl}${path}`;
+    const url = `http://localhost${path}`;
     let response: Response;
     try {
       const fetchPromise = fetchImpl(url, {
         method,
         headers,
         body: requestBody,
-        ...(socket ? { unix: socket } : {}),
+        unix: socketPath,
       });
       response = await withTimeout(fetchPromise, queryTimeoutMs);
     } catch (err) {
@@ -237,9 +213,7 @@ export function newLastDbClient(opts: {
       }
       throw new LastSecretsError(
         "service_unreachable",
-        socket
-          ? `LastDB is not reachable over its Unix socket ${socket}.`
-          : `LastDB is not reachable at ${nodeUrl}.`,
+        `LastDB is not reachable over its Unix socket ${socketPath}.`,
         err,
       );
     }
@@ -255,31 +229,15 @@ export function newLastDbClient(opts: {
     return parsed;
   };
 
-  // A field map selects field names. It never selects the record-ownership model.
-  let canonicalMode: boolean | undefined = opts.canonicalVocabulary === "auto"
-    ? undefined : opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
-  let vocabularyReadiness: Promise<boolean> | undefined;
-  const useCanonicalVocabulary = (): Promise<boolean> => {
-    return vocabularyReadiness ??= (async () => {
-      const [catalog, version] = await Promise.all([
-        callJson("/api/schemas", "GET").then(unwrapData), callJson("/api/version", "GET").then(unwrapData),
-      ]);
-      if (!Array.isArray(catalog.schemas)) throw new LastSecretsError("schema_catalog_invalid", "Cannot confirm the local schema format before declaration.");
-      requireOwnedHome(catalog.schemas, version);
-      const legacy = catalog.schemas.some((value) => {
-        if (!value || typeof value !== "object") return false;
-        const schema = value as Record<string, unknown>;
-        return schema.owner_app_id === OWNER_APP_ID && Array.isArray(schema.fields) &&
-          schema.fields.some((name) => name === "slug" || name === "payload_json" || name === "secret_value");
-      });
-      canonicalMode ??= !legacy;
-      if (canonicalMode && legacy) throw new LastSecretsError("canonical_migration_required", "This home uses legacy secret fields. An explicit data migration is required before new schema publication.");
-      return canonicalMode;
-    })();
+  let readiness: Promise<void> | undefined;
+  const ensureReady = (): Promise<void> => {
+    return readiness ??= callJson("/api/version", "GET").then(unwrapData).then((version) => {
+      requireOwnedHome(version);
+    });
   };
 
   return {
-    get schemaFieldAliases() { return canonicalMode === true ? {...fieldProfiles} : undefined; },
+    get schemaFieldAliases() { return {...fieldProfiles}; },
     nativeBatch: newNativeBatchClient(sdkTransport),
     async autoIdentity() {
       const body = await callJson("/api/system/auto-identity", "GET");
@@ -293,12 +251,12 @@ export function newLastDbClient(opts: {
       return { userHash };
     },
     async declareAppSchema(appId, schema) {
-      const canonicalMode = await useCanonicalVocabulary();
+      await ensureReady();
       const local = schema;
-      if (canonicalMode) schema = canonicalSchema(schema);
+      schema = canonicalSchema(schema);
       const body = await callJson("/api/schemas/declare", "POST", {namespace:appId, schema});
       const {identity, runtime} = ownedDeclaration(body, `${appId}/${schema.name}`);
-      if (canonicalMode) Object.assign(fieldProfiles, profilesFor(local, [identity, runtime]));
+      Object.assign(fieldProfiles, profilesFor(local, [identity, runtime]));
       return {canonical:identity, schemaName:runtime};
     },
     async createRecord({ schemaHash, fields, keyHash }) {
@@ -321,13 +279,11 @@ export function newLastDbClient(opts: {
   };
 }
 
-function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
+function mapSdkError(err: unknown, socketPath: string): Error {
   if (err instanceof TransportError) {
     return new LastSecretsError(
       "service_unreachable",
-      isLoopbackNodeUrl(nodeUrl)
-        ? `LastDB is not reachable over its Unix socket ${socketPath}.`
-        : `LastDB is not reachable at ${nodeUrl}.`,
+      `LastDB is not reachable over its Unix socket ${socketPath}.`,
       err,
     );
   }
@@ -339,19 +295,6 @@ function mapSdkError(err: unknown, nodeUrl: string, socketPath: string): Error {
     );
   }
   return err instanceof Error ? err : new Error(String(err));
-}
-
-function stripTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-function isLoopbackNodeUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1";
-  } catch {
-    return false;
-  }
 }
 
 function parseBody(text: string): unknown {

@@ -1,19 +1,13 @@
 /** Declaration rules. Field names and record ownership are separate decisions. */
-import { OWNER_APP_ID, OWNED_HOME_API_VERSION, apiVersionOf, ownedHome } from "./schema.ts";
-import { LastSecretsError } from "./lastdb.ts";
+import { OWNER_APP_ID, MIN_API_VERSION, apiVersionOf } from "./schema.ts";
 
 type Entry = Record<string, unknown>;
 const object = (value: unknown): Entry | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Entry : null;
 
 /** Refuses a node that cannot serve the app's complete-record wire contract. */
-export function requireOwnedHome(schemas: unknown[], version: unknown): void {
-  if (!ownedHome(apiVersionOf(version))) {
-    if (schemas.some((schema) => object(schema)?.owner_app_id === OWNER_APP_ID)) {
-      throw new LastSecretsError("home_copy_required",
-        `home_copy_required: This LastDB node is older than API ${OWNED_HOME_API_VERSION} and holds LastSecrets schemas. ` +
-        "Move the values to a new home with the home copy (last-stack-lastdb-home-copy).");
-    }
-    throw new Error(`New LastSecrets schemas require LastDB API ${OWNED_HOME_API_VERSION} or later.`);
+export function requireOwnedHome(version: unknown): void {
+  if (apiVersionOf(version) < MIN_API_VERSION) {
+    throw new Error(`New LastSecrets schemas require LastDB API ${MIN_API_VERSION} or later.`);
   }
   const capabilities = object(object(version)?.capabilities);
   if (capabilities?.owned_app_schemas_v1 !== true) {

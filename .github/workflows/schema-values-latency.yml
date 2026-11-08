@@ -12,10 +12,9 @@ concurrency:
   group: lastsecrets-values-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 env:
-  # Both apps use the latest daemon when their record APIs are compatible.
+  # Both apps use the latest daemon.
   # The old app is the PR base, or the previous main on a push. A manual run compares HEAD with itself.
-  # Keep the legacy app as the before arm for the first proof after the API port.
-  APP_BEFORE: ${{ (github.event.pull_request.base.sha || github.event.before) == 'c0b50e466a37438bb66e4abc3b8bf70f9dc13301' && '1828a4cf901518f4b7ee334727302f3365c5297c' || github.event.pull_request.base.sha || github.event.before || github.sha }}
+  APP_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   # The daemon reads this value and uses the DEV Schema Service.
@@ -47,10 +46,6 @@ jobs:
             --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
           test -n "$tag" && test "$tag" != null
           before_tag="$tag"
-          if ! jq -e '.schemas | length > 0 and all(.[]; .record_keys != null)' baseline/lastdb-app.json >/dev/null &&
-              jq -e '.schemas | length > 0 and all(.[]; .record_keys != null)' candidate/lastdb-app.json >/dev/null; then
-            before_tag=nightly-20261104-4b76c7c90
-          fi
           for label in before after; do
             selected="$tag"
             if [ "$label" = before ]; then selected="$before_tag"; fi

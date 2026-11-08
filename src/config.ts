@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
-import { normalizeNodeUrl } from "./lastdb.ts";
 
 export const CONFIG_VERSION = 1;
 
@@ -98,8 +97,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
 
   const config: Config = {
     configVersion: CONFIG_VERSION,
-    // Heal retired TCP :9001 so stale configs keep working over the socket.
-    nodeUrl: normalizeNodeUrl(r.nodeUrl as string),
+    nodeUrl: r.nodeUrl as string,
     userHash: r.userHash as string,
     schemaHash: r.schemaHash as string,
   };
