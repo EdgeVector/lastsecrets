@@ -34,8 +34,7 @@ The secret schema and the metadata summary schema own their values.
 The app requires LastDB API 29 or later for complete records and explicit keys.
 These schemas hold different records. Do not combine them as alternate keys.
 Canonical field reuse supplies definitions only. It does not share record values.
-A home on an older node moves only by the home copy (EdgeVector/last-stack#377).
-`init` and `delete` refuse that home with `home_copy_required`. The app has no in-place command for old homes.
+`init` requires LastDB API 29 or later and the `owned_app_schemas_v1` capability.
 Field aliases select field names; they never select the record-ownership model.
 Do not change the primary during source or CI work.
 
@@ -44,9 +43,9 @@ Use LastSecrets for all secret writes and reads in this repo.
 - Store raw values only with `lastsecrets put <slug> ... --value-stdin`.
 - Retrieve raw values only at the point of use with `lastsecrets get <slug>`.
 - Persist only `lastsecrets://<slug>` locators in Brain, Kanban, docs, logs,
-  PR bodies, CI configs, LastGit CRs, and source files.
+  PR bodies, CI configs, and source files.
 - Run `lastsecrets guard [PATH...]` before publishing docs or automation changes
   that mention credentials.
 - If LastSecrets is unavailable, stop before handling raw secret material and ask
   Tom how to proceed.
-- The tests are deleted (Tom, 2026-10-09). The gate runs shell syntax checks, typecheck and the artifact build.
+- The tests are deleted (Tom, 2026-10-09). The gate runs shell syntax checks, typecheck, and a per-file bun build.

@@ -28,7 +28,7 @@ LastSecrets requires LastDB API 29 or later and explicit record keys.
 The secret records and metadata summaries use separate schemas that own their values.
 Canonical field definitions stay reusable. They do not share record values.
 These are separate record types, so this change adds no alternate key.
-A home on an older node moves to this release only by the home copy. See "Existing homes" below.
+`init` requires LastDB API 29 or later and the `owned_app_schemas_v1` capability.
 
 The initial schema contract is defined in `src/schema.ts`.
 
@@ -41,6 +41,8 @@ Initialize the local LastDB-backed config:
 ```sh
 lastsecrets init
 ```
+
+Socket resolution order: `--socket`, `LASTSECRETS_SOCKET_PATH`, `LASTDB_SOCKET_PATH`, the config `nodeSocketPath`, then `$LASTDB_HOME/data/folddb.sock`.
 
 Store a secret from stdin:
 
@@ -93,8 +95,8 @@ lastsecrets delete temporary-dev-invite temporary-dev-api-key
 
 The command accepts 1–63 distinct slugs and an optional `--config PATH`.
 It uses the current owner access and the same configured schema route as get and put.
-It reads the node API version with the schema list and requires API 29 or later before reading keys.
-It selects the configured name first, or the saved hash when the name is absent.
+It reads the schema list before reading keys.
+It routes by the pinned schema hash.
 It requires one exact installed name, the correct owner, complete field names, a hash key, and state Available.
 It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
 A retired name claim remains valid for this exact installed route. The command never switches to another schema name.
@@ -150,57 +152,6 @@ prints only redacted previews, and exits non-zero when a human should replace
 the value with a LastSecrets record plus locator. It intentionally ignores
 `lastsecrets://...` refs and environment-variable placeholders.
 
-## LastGit CI Contract
-
-LastGit CRs and CI definitions should carry `lastsecrets://<slug>` locators, not
-plaintext values. A runner that needs a secret resolves the locator at execution
-time, injects the value into the child process environment or stdin, and redacts
-the value from status, logs, summaries, and retry metadata. Resolution failure is
-a hard preflight error: the runner should not continue with an empty placeholder
-or ask an agent to paste the raw value into LastGit.
-
-## Migrating raw secrets out of Brain
-
-Some Brain records may still contain raw secret values inline. `lastsecrets migrate`
-provides a **reviewable, staged** path from those raw values to `lastsecrets://`
-references. It never does a broad destructive rewrite.
-
-The flow is two-phase:
-
-1. **Plan (default, read-only).** Scan the named Brain schema(s)/field(s) for
-   secret material, classify every hit, and print a migration log. Nothing is
-   written.
-
-   ```sh
-   lastsecrets migrate --schema brain/Note --fields body,title --log migration.plan.log
-   ```
-
-2. **Apply (`--apply`).** Execute only the **high-confidence** staged actions:
-   store each secret through LastSecrets, then replace the raw value in the
-   owning Brain record with its `lastsecrets://` locator. Uncertain detections
-   are left untouched.
-
-   ```sh
-   lastsecrets migrate --schema brain/Note --fields body,title --apply --log migration.apply.log
-   ```
-
-Classification:
-
-- **High confidence** (staged, applied under `--apply`): provider token shapes
-  (AWS/GitHub/Slack/Stripe/OpenAI/Anthropic/Google keys), JWTs, and PEM private
-  key blocks.
-- **Uncertain** (recorded as `needs review`, **never** rewritten automatically):
-  generic `secret = ...` / `password = ...` / `token = ...` assignments, which
-  can be schema field names, documentation, or placeholders.
-
-Placeholders (`<redacted>`, `${ENV_VAR}`, `changeme`, already-migrated
-`lastsecrets://...` refs, values under 8 chars, …) are ignored.
-
-The migration log records, for every scanned record: what was **staged**, what
-**needs review**, and what was **intentionally left untouched** — and, after an
-apply, how many secrets were stored, how many records were updated, and any
-errors. Raw secret values never appear in the log (previews are redacted).
-
 ## Threat Model
 
 LastSecrets is a local LastDB client, not a network vault. The first threat boundary is accidental disclosure through developer workflows: logs, errors, search output, test snapshots, and references must not contain raw secret values. The CLI therefore accepts writes only through `--value-stdin`, stores the value in the `secret_value` field, and redacts that field everywhere except `lastsecrets get <slug>`.
@@ -215,7 +166,7 @@ LastDB owns local durability and access to the socket. LastSecrets relies on the
 bun run typecheck
 ```
 
-The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck and the artifact build in `.lastgit/ci.sh`.
+The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck, and a per-file bun build in `.lastgit/ci.sh`. A push to `main` then runs `registry-commit`.
 
 ## Canonical field vocabulary
 
@@ -229,36 +180,14 @@ Neither command reads secret values.
 
 The command interface keeps local names such as `slug` and `label`.
 An explicit field map translates these names at the transport boundary.
-The config stores this map for each registered schema identity. Reads and writes use the pinned canonical identity.
+The config stores this map for each registered schema identity. Reads and writes use the pinned schema hash.
 The map does not copy records or add another field key.
-A config without this map retains its existing data path.
 
 CAUTION: New canonical names produce new schema identities.
-A config without a field map keeps its existing field names.
-All new declarations require schema-owned values, with or without a field map.
-`init` refuses a node older than API 13 before the first declaration.
+`init` refuses a node older than API 29, or a node without `owned_app_schemas_v1`, before the first declaration.
 It also refuses a change to a saved definition identity.
 The config write uses an atomic replacement and flushes the file and its directory.
 Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
-
-## Existing homes
-
-This release requires LastDB API 13 or later (lastdb #803). It does not change a home in place. It has no command for old homes.
-
-CAUTION: Do not use this release on a node older than API 13.
-On that node, `init` refuses a home that holds LastSecrets schemas with `home_copy_required` and make no change.
-`delete` refuses that node with `home_copy_required` and makes no change.
-
-A home on an older node moves to this release only by the home copy (EdgeVector/last-stack#377):
-
-1. The home copy reads the old home. It does not change the old home.
-2. The home copy writes the `LastSecret` and `LastSecretIndex` records, with the secret values, to a new home.
-3. This release initializes the new home with `lastsecrets init`.
-4. The old home stays unchanged as the recovery point.
-
-CAUTION: A format 7 home refuses a record above 64 KiB. An earlier release adds every new entry to `__all__`. Use this release for each new secret before a copy to a format 7 home. This release adds no entry to `__all__`.
-
-A primary change requires Tom's authorization.
 
 ## CI comparison
 

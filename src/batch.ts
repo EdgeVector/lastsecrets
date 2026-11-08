@@ -3,7 +3,7 @@ import type { Transport } from "@lastdb/app-sdk";
 import type { Config } from "./config.ts";
 import type { QueryRow } from "./lastdb.ts";
 import {
-  ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, apiVersionOf, lastSecretIndexSchema, lastSecretSchema, ownedHome, secretRef,
+  ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef,
 } from "./schema.ts";
 import { INDEX_BUCKET_COUNT, indexBucketKey } from "./index-rows.ts";
 
@@ -28,7 +28,6 @@ export type BatchMutation = {
 };
 export type NativeBatchClient = {
   schemas(): Promise<unknown>;
-  version(): Promise<unknown>;
   readKeys(reads: ExactRead[]): Promise<(QueryRow | null)[]>;
   mutate(mutations: BatchMutation[]): Promise<void>;
 };
@@ -100,7 +99,6 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
   };
   return {
     async schemas() { return send("GET", "/api/schemas"); },
-    async version() { return send("GET", "/api/version"); },
     async readKeys(reads) {
       if (reads.length < 1 || reads.length > DELETE_READ_LIMIT) throw new DeleteError("invalid_read_count");
       // Each chunk fits the native per-request limit. Chunks run in parallel.
@@ -159,23 +157,19 @@ function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
   };
 }
 
-/** `version` is the `GET /api/version` reply. Delete runs only on a node that owns every schema's values. */
 export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
-  "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName" | "schemaFieldAliases"
->, version: unknown): { secret: string; index: string } {
-  if (!ownedHome(apiVersionOf(version))) throw new DeleteError("home_copy_required");
+  "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName"
+>): { secret: string; index: string } {
   const catalog = object(body);
   if (catalog.ready !== true || !Array.isArray(catalog.schemas)) throw new DeleteError("schema_catalog_not_ready");
-  const secretCanonical = Boolean(config.schemaFieldAliases?.[config.schemaHash]);
-  const indexCanonical = Boolean(config.indexSchemaHash && config.schemaFieldAliases?.[config.indexSchemaHash]);
   return {
-    secret: resolveSchema(catalog.schemas, secretCanonical ? canonicalSchema(lastSecretSchema.schema) : lastSecretSchema.schema, config.schemaHash, config.schemaName, secretCanonical),
-    index: resolveSchema(catalog.schemas, indexCanonical ? canonicalSchema(lastSecretIndexSchema.schema) : lastSecretIndexSchema.schema, config.indexSchemaHash, config.indexSchemaName, indexCanonical),
+    secret: resolveSchema(catalog.schemas, canonicalSchema(lastSecretSchema.schema), config.schemaHash, config.schemaName),
+    index: resolveSchema(catalog.schemas, canonicalSchema(lastSecretIndexSchema.schema), config.indexSchemaHash, config.indexSchemaName),
   };
 }
 function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,
-  configuredHash?: string, configuredName?: string, canonical = false): string {
-  let route = canonical ? configuredHash : configuredName || configuredHash;
+  configuredHash?: string, configuredName?: string): string {
+  let route = configuredHash;
   if (!configuredHash || !/^[a-f0-9]{64}$/.test(configuredHash) || !route) {
     throw new DeleteError("configured_schema_identity_mismatch");
   }

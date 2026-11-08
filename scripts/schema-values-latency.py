@@ -131,14 +131,11 @@ def listed(text, expected):
 def schemas(config):
     cfg = json.loads(config.read_text())
     aliases = cfg.get("schemaFieldAliases", {})
-    record_schema = cfg["schemaHash"] if cfg["schemaHash"] in aliases else cfg.get("schemaName", cfg["schemaHash"])
-    summary = cfg["indexSchemaHash"] if cfg["indexSchemaHash"] in aliases else cfg.get("indexSchemaName", cfg["indexSchemaHash"])
-    return aliases, record_schema, summary
+    return aliases, cfg["schemaHash"], cfg["indexSchemaHash"]
 
 
 def query_records(node, queries):
-    if node.api_version >= 29:
-        queries = [{name: value for name, value in query.items() if name != "fields"} for query in queries]
+    queries = [{name: value for name, value in query.items() if name != "fields"} for query in queries]
     return node.call("/api/queries/batch", {"queries": queries})[0]
 
 
@@ -221,8 +218,6 @@ def move_to_root(node, config, slugs):
         fields = {name("key"): key, name("updated_at"): now,
                   name("payload_json"): json.dumps(entries, separators=(",", ":"))}
         base = {"type": "mutation", "schema": summary, "key_value": {"hash": key, "range": None}}
-        if node.api_version < 29:
-            return {**base, "mutation_type": mutation_type, "fields_and_values": fields}
         revision = revisions.get(key)
         require(mutation_type == "create" or isinstance(revision, str), "The root move lacks a record revision")
         expected = {"type": "absent"} if mutation_type == "create" else {"type": "revision", "revision": revision}
@@ -326,8 +321,7 @@ def arm(args, Node, cleanup, label, pair):
                     "Repeated setup changed a saved definition identity")
             require(snapshot(node, config, expected) == before, "Repeated setup changed a value or the record metadata")
             owned = [schema for schema in node.call("/api/schemas")[0]["schemas"] if schema.get("owner_app_id") == "lastsecrets"]
-            # Every schema on a node at API 13 or later (lastdb #803) owns its values.
-            require(len(owned) == 2 and home["api_version"] >= 13, "The actual app does not own exactly two schemas")
+            require(len(owned) == 2 and home["api_version"] >= 29, "The actual app does not own exactly two schemas")
             require(all(not schema.get("alternate_keys") for schema in owned), "Different record types became alternate keys")
         for index in range(args.records):
             result, elapsed = command(binary, node, config, "get", slug(index), operation="get")

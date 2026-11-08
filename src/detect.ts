@@ -1,20 +1,16 @@
-// Secret detection + classification for the Brain → LastSecrets migration.
+// Secret detection for `lastsecrets guard`.
 //
-// This module is intentionally pure and dependency-free: it takes the text of a
-// Brain record and returns candidate secret detections with a confidence level.
-// The migration never rewrites a record on a low-confidence ("uncertain")
-// detection — those are surfaced for human review instead. Keeping the
-// heuristics here, separate from any LastDB/Brain I/O, is what makes the
-// classification reviewable and unit-testable.
+// This module is pure: it takes text and returns candidate detections with a
+// confidence level. `guard` reports them and does not rewrite the file.
 
 export type Confidence = "high" | "uncertain";
 
 export type Detection = {
   /** The exact raw secret substring found in the source text. */
   value: string;
-  /** How the detection was made, for the migration log and review. */
+  /** How the detection was made. */
   rule: string;
-  /** high = safe to stage an automatic replacement; uncertain = review only. */
+  /** high = a provider token shape; uncertain = review only. */
   confidence: Confidence;
   /** Byte offset of `value` within the scanned text. */
   index: number;
@@ -45,7 +41,7 @@ const PLACEHOLDER_PATTERNS: RegExp[] = [
   /^\$\{[^}]+\}$/, // ${ENV_VAR}
   /^\$[A-Z_][A-Z0-9_]*$/, // $ENV_VAR
   /^env:/i,
-  /^lastsecrets:\/\//i, // already migrated
+  /^lastsecrets:\/\//i, // a lastsecrets reference, not a raw secret
 ];
 
 // High-confidence provider token shapes. Matching one of these is strong enough

@@ -1,9 +1,9 @@
 # CI
 
 `ci-required.yml` is the gate of record. GitHub is the source of truth for
-`EdgeVector/lastsecrets` since 2026-09-30. The `ci-required` job is the required
-check on `main`. The `publish` job builds the host-track artifact on a push to
-`main`. LastGit and Forgejo copies are frozen.
+`EdgeVector/lastsecrets`. The `ci-required` job is the required check on `main`.
+It runs shell syntax checks, a frozen install, typecheck, and a per-file bun build.
+A push to `main` then runs `registry-commit`.
 
 `schema-values-latency.yml` runs the normal LastSecrets CLI on generated homes.
 It compares the old app (the PR base, or the previous main on a push) with the new app.
