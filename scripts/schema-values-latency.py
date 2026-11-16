@@ -235,12 +235,18 @@ def move_to_root(node, config, slugs):
 
 
 def require_cloud_off(node, output, phase):
-    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
-    require(status.get("enabled") is False and status.get("automatic_backup_enabled") is False
-            and status.get("running") is False and status.get("manual_connection") is None,
+    # Nightly 3484b912 removed POST /api/sync/byte-backup-v2. GET /api/status
+    # still reports whether this home is on cloud sync: no saved connection,
+    # no accepted-write capture, and no per-database progress.
+    reply = node.call("/api/status")[0]
+    reported = reply.get("status") if isinstance(reply, dict) else None
+    cloud = reported.get("cloud_sync") if isinstance(reported, dict) else None
+    fields = ("connected", "environment", "captures_accepted", "payment_hold", "last_error", "databases")
+    require(isinstance(cloud, dict) and cloud.get("connected") is False and cloud.get("environment") is None
+            and cloud.get("captures_accepted") is False and cloud.get("payment_hold") is False
+            and cloud.get("last_error") is None and cloud.get("databases") == {},
             "The generated comparison node must keep cloud backup off")
-    save(output / f"cloud-off-{phase}.json", {
-        key: status.get(key) for key in ("enabled", "automatic_backup_enabled", "running", "manual_connection")})
+    save(output / f"cloud-off-{phase}.json", {key: cloud.get(key) for key in fields})
 
 
 def finish_setup(node, output, cleanup):
