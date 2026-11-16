@@ -166,7 +166,7 @@ LastDB owns local durability and access to the socket. LastSecrets relies on the
 bun run typecheck
 ```
 
-The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck, and a per-file bun build in `.lastgit/ci.sh`. A push to `main` then runs `registry-commit`.
+The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax checks, the typecheck, and a per-file bun build in `.lastgit/ci.sh`.
 
 ## Canonical field vocabulary
 
