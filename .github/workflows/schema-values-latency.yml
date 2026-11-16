@@ -64,7 +64,8 @@ jobs:
             printf '%stag=%s\n%soid=%s\n%slastdbd=%s\n' "$prefix" "$selected" "$prefix" "$oid" "$prefix" "$dir/lastdbd" >> "$GITHUB_OUTPUT"
             printf 'Daemon %s: %s at %s, SHA-256 %s\n' "$label" "$selected" "$oid" "$want" >> "$GITHUB_STEP_SUMMARY"
           done
-      # The benchmark helpers (node.py, cleanup.py, artifact.py) match the nightly daemon source.
+      # node.py and artifact.py match the nightly daemon source.
+      # Cleanup is this repo's scripts/cleanup.py, not a lastdb checkout path.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: EdgeVector/lastdb

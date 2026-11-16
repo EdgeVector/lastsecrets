@@ -453,11 +453,12 @@ def main():
             == args.daemon_revision, "The actual daemon support source differs")
     require(not args.output.exists() and args.output.parent.resolve().is_relative_to(runner), "A fresh runner output path is required")
     args.output.mkdir(mode=0o700)
+    # scripts/cleanup.py lives next to this file. Import it before the lastdb
+    # helpers so a same-named module in the daemon tree cannot replace it.
+    import cleanup
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
     sys.path.append(str(args.lastdb_source / "scripts/benchmarks/range_continuation"))
-    sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
     from node import Node, file_hash
-    import cleanup
     Node = nightly_node(Node)
     summary = {"complete":False,"sources":{name:str(item) for name,item in vars(args).items()},"arms":[],
                "program_sha256":{name:file_hash(getattr(args,name)) for name in ("baseline","candidate","daemon","before_daemon")}}
