@@ -181,14 +181,15 @@ function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.s
     if (typeof name !== "string" || (configuredName && configuredName !== name)) throw new DeleteError("configured_schema_identity_mismatch");
     route = name;
   }
-  // Pin the same literal route as get/put. Retirement only controls descriptive-name resolution.
+  // Pin the same literal route as get/put. Current catalogs omit
+  // name_claim_retired. The configured name and identity still have to match.
   const matches = schemas.filter((value) => object(value).name === route);
   if (matches.length !== 1) throw new DeleteError("schema_owner_identity_ambiguous");
   const schema = object(matches[0]);
   const recordKeys = object(schema.record_keys);
   const primary = object(recordKeys.primary);
   if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
-      schema.state !== "Available" || typeof schema.name_claim_retired !== "boolean" ||
+      schema.state !== "Available" ||
       schema.identity_hash !== configuredHash ||
       schema.schema_type !== definition.schema_type || primary.kind !== definition.record_keys.primary.kind ||
       primary.allow_absent === true || (primary.range_type !== undefined && primary.range_type !== null) ||
