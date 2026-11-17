@@ -1,14 +1,17 @@
 export const OWNER_APP_ID = "lastsecrets";
 
-/** Minimum LastDB API for complete records and explicit keys. */
-export const MIN_API_VERSION = 29;
+/** Exact schema names. The installer places these. A hash does not resolve on the app socket. */
+export const LAST_SECRET_SCHEMA = `${OWNER_APP_ID}/LastSecret`;
+export const LAST_SECRET_INDEX_SCHEMA = `${OWNER_APP_ID}/LastSecretIndex`;
 
-/** `api_version` from a `GET /api/version` reply (bare or in a `data` envelope); 0 when absent. */
-export function apiVersionOf(reply: unknown): number {
-  const isObject = (value: unknown): value is Record<string, unknown> =>
-    typeof value === "object" && value !== null && !Array.isArray(value);
-  const body = isObject(reply) && isObject(reply.data) ? reply.data : reply;
-  return isObject(body) && typeof body.api_version === "number" ? body.api_version : 0;
+/** The saved config names the schema, or it still has the name beside an old hash pin. */
+export function configuredSchemaName(
+  name: string | undefined,
+  legacy: string | undefined,
+  expected: string,
+): string {
+  if (name === expected || legacy === expected) return expected;
+  throw new Error(`Config must name ${expected}. Run \`lastsecrets init\` again.`);
 }
 
 export type FieldType =

@@ -1,6 +1,6 @@
 {
   "app_id": "lastsecrets",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "source": "https://github.com/EdgeVector/lastsecrets.git",
   "metadata": {
     "display_name": "lastsecrets",
@@ -198,5 +198,16 @@
     ],
     "post_install": [],
     "requires": []
+  },
+  "access": {
+    "read": [
+      "lastsecrets/LastSecret",
+      "lastsecrets/LastSecretIndex"
+    ],
+    "write": [
+      "lastsecrets/LastSecret",
+      "lastsecrets/LastSecretIndex"
+    ],
+    "extensions": []
   }
 }

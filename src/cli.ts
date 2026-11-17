@@ -3,10 +3,11 @@
 import { canonicalSchema } from "./canonical-vocabulary.ts";
 import vocabulary from "./canonical-fields.json" with { type: "json" };
 import pkg from "../package.json" with { type: "json" };
-import { OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef } from "./schema.ts";
+import { LAST_SECRET_INDEX_SCHEMA, LAST_SECRET_SCHEMA, lastSecretSchema, secretRef } from "./schema.ts";
 import { ConfigError, defaultConfigPath, readConfig, writeConfig, type Config } from "./config.ts";
 import {
   defaultNodeUrl,
+  installedFieldAliases,
   newLastDbClient,
   resolveSocketPath,
 } from "./lastdb.ts";
@@ -67,38 +68,24 @@ export async function run(
       try { existing = readConfig(configPath); } catch (error) {
         if (!(error instanceof ConfigError) || error.code !== "config_missing") throw error;
       }
-      const preflight = cliDeps.newClient({ socketPathOverride: socketPath });
-      const { userHash } = await preflight.autoIdentity();
-      const client = cliDeps.newClient({ socketPathOverride: socketPath,
-        schemaFieldAliases:existing?.schemaFieldAliases,
-      });
-      // The node declares both owned schemas and returns their definition
-      // identities. LastSecrets never writes to Schema Service itself.
-      const [{ canonical, schemaName }, { canonical: indexCanonical, schemaName: indexSchemaName }] =
-        await Promise.all([
-          client.declareAppSchema(OWNER_APP_ID, lastSecretSchema.schema),
-          client.declareAppSchema(OWNER_APP_ID, lastSecretIndexSchema.schema),
-        ]);
-      if (existing && (existing.schemaHash !== canonical || existing.indexSchemaHash !== indexCanonical)) {
-        throw new Error("The installed schema identities differ from this config. The config stays unchanged.");
-      }
+      // Local config only. The installer places the schemas. This command does not contact the node.
       writeConfig(
         {
           configVersion: 1,
           nodeUrl,
-          userHash,
-          schemaHash: canonical,
-          schemaName,
-          indexSchemaHash: indexCanonical,
-          indexSchemaName,
+          userHash: existing?.userHash ?? "local",
+          schemaHash: LAST_SECRET_SCHEMA,
+          schemaName: LAST_SECRET_SCHEMA,
+          indexSchemaHash: LAST_SECRET_INDEX_SCHEMA,
+          indexSchemaName: LAST_SECRET_INDEX_SCHEMA,
           nodeSocketPath: socketPath,
-          schemaFieldAliases:client.schemaFieldAliases,
+          schemaFieldAliases: installedFieldAliases(),
         },
         configPath,
       );
       io.stdout.write(`initialized LastSecrets config at ${configPath}\n`);
-      io.stdout.write(`schema=${canonical}\n`);
-      io.stdout.write(`index-schema=${indexCanonical}\n`);
+      io.stdout.write(`schema=${LAST_SECRET_SCHEMA}\n`);
+      io.stdout.write(`index-schema=${LAST_SECRET_INDEX_SCHEMA}\n`);
       return 0;
     }
 
@@ -341,7 +328,7 @@ function usage(): string {
     "       lastsecrets admin-slice",
     "       lastsecrets guard [PATH...]",
     "",
-    "init     — declare schema-owned values through Mini and pin definition identities.",
+    "init     — write the local config with the exact schema names. The installer places the schemas.",
     "admin-slice — emit metadata-only JSON for the admin delivery path.",
     "delete   — delete exact local slugs and repair metadata; emit a value-free JSON receipt.",
   ].join("\n");

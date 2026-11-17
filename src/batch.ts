@@ -1,9 +1,11 @@
-import { canonicalSchema } from "./canonical-vocabulary.ts";
-import type { Transport } from "@lastdb/app-sdk";
+import {
+  AppApiError, TransportError,
+  type AppApiMutation, type AppApiReadResult, type AppApiWriteResult, type RowFields,
+} from "@lastdb/app-sdk";
 import type { Config } from "./config.ts";
 import type { QueryRow } from "./lastdb.ts";
 import {
-  ALL_SECRETS_INDEX_KEY, OWNER_APP_ID, lastSecretIndexSchema, lastSecretSchema, secretRef,
+  ALL_SECRETS_INDEX_KEY, LAST_SECRET_INDEX_SCHEMA, LAST_SECRET_SCHEMA, lastSecretIndexSchema, lastSecretSchema, secretRef,
 } from "./schema.ts";
 import { INDEX_BUCKET_COUNT, indexBucketKey } from "./index-rows.ts";
 
@@ -11,7 +13,7 @@ export const DELETE_METADATA_FIELDS = lastSecretSchema.schema.fields.filter(
   (field) => field !== "secret_value",
 );
 export const DELETE_SLUG_LIMIT = 63;
-/** The native limit of one `/api/queries/batch` request. */
+/** The app API accepts at most 64 reads in one list. */
 const NATIVE_KEY_LIMIT = 64;
 /** The slugs, the root index row and at most one bucket row per slug. */
 const DELETE_READ_LIMIT = DELETE_SLUG_LIMIT + 1 + INDEX_BUCKET_COUNT;
@@ -26,8 +28,11 @@ export type BatchMutation = {
   mutation_type: "delete" | "replace";
   expected: { type: "revision"; revision: string };
 };
+export type AppPlane = {
+  read(reads: readonly { schema: string; key: { hash: string; range: null }; limit: number }[]): Promise<AppApiReadResult[]>;
+  write(mutations: readonly AppApiMutation[]): Promise<AppApiWriteResult>;
+};
 export type NativeBatchClient = {
-  schemas(): Promise<unknown>;
   readKeys(reads: ExactRead[]): Promise<(QueryRow | null)[]>;
   mutate(mutations: BatchMutation[]): Promise<void>;
 };
@@ -68,40 +73,32 @@ export function validateDeleteSlugs(slugs: string[]): void {
   }
 }
 
-/** Uses the existing owner transport. No declarations, grants, retries, or raw response errors. */
-export function newNativeBatchClient(transport: Transport): NativeBatchClient {
-  const send = async (method: "GET" | "POST", path: string, body?: unknown) => {
-    let response;
-    try {
-      response = await transport.send(method, path, body === undefined ? undefined : { body });
-    } catch {
-      // The SDK transport error can contain a non-JSON response excerpt. Never retain its cause.
-      throw new DeleteError("transport_outcome_unknown");
+/** Uses the app API. No declarations, grants, retries, or raw response bodies. */
+export function newNativeBatchClient(plane: AppPlane): NativeBatchClient {
+  const refuse = (err: unknown): never => {
+    // Never retain an SDK cause. Its body can quote a response.
+    if (err instanceof AppApiError) {
+      throw new DeleteError(err.status === 409 ? "metadata_conflict" : "request_outcome_unconfirmed");
     }
-    if (response.status !== 200) {
-      throw new DeleteError(response.status === 409 ? "metadata_conflict" : "request_outcome_unconfirmed");
-    }
-    const parsed = object(response.body);
-    if (parsed.ok !== true) throw new DeleteError("reply_not_acknowledged");
-    return parsed;
+    if (err instanceof TransportError) throw new DeleteError("transport_outcome_unknown");
+    throw new DeleteError("request_outcome_unconfirmed");
   };
   const readChunk = async (reads: ExactRead[]): Promise<(QueryRow | null)[]> => {
-    // Bounded reads share the normal owner transport.
-    const reply = await send("POST", "/api/queries/batch", {
-      queries: reads.map((read) => ({
-        schema_name: read.schema, filter: { HashKey: read.key }, limit: 2, offset: 0,
-      })),
-    });
-    if (reply.count !== reads.length || !Array.isArray(reply.results) || reply.results.length !== reads.length) {
-      throw new DeleteError("read_batch_reply_ambiguous");
+    let results: AppApiReadResult[];
+    try {
+      results = await plane.read(reads.map((read) => ({
+        schema: read.schema, key: { hash: read.key, range: null }, limit: 2,
+      })));
+    } catch (err) {
+      return refuse(err);
     }
-    return reply.results.map((item, position) => parseExactRead(item, reads[position]!));
+    if (results.length !== reads.length) throw new DeleteError("read_batch_reply_ambiguous");
+    return results.map((item, position) => parseExactRead(item, reads[position]!));
   };
   return {
-    async schemas() { return send("GET", "/api/schemas"); },
     async readKeys(reads) {
       if (reads.length < 1 || reads.length > DELETE_READ_LIMIT) throw new DeleteError("invalid_read_count");
-      // Each chunk fits the native per-request limit. Chunks run in parallel.
+      // Each chunk fits the app API per-request limit. Chunks run in parallel.
       const chunks: ExactRead[][] = [];
       for (let start = 0; start < reads.length; start += NATIVE_KEY_LIMIT) {
         chunks.push(reads.slice(start, start + NATIVE_KEY_LIMIT));
@@ -109,22 +106,28 @@ export function newNativeBatchClient(transport: Transport): NativeBatchClient {
       return (await Promise.all(chunks.map(readChunk))).flat();
     },
     async mutate(mutations) {
-      const reply = await send("POST", "/api/mutations/batch", {
-        mutations: mutations.map((item) => ({ ...item, durability: "durable" })),
-      });
-      const operations = object(reply.operations);
-      const deleted = mutations.filter((item) => item.mutation_type === "delete").length;
-      const updated = mutations.length - deleted;
-      if (reply.count !== mutations.length || !Array.isArray(reply.mutation_ids) ||
-          reply.mutation_ids.length !== mutations.length ||
-          reply.mutation_ids.some((id) => typeof id !== "string" || id.length === 0) ||
-          new Set(reply.mutation_ids).size !== mutations.length ||
-          operations.total !== mutations.length || operations.deleted !== deleted ||
-          operations.updated !== updated || operations.created !== 0 ||
-          reply.durability !== "durable") {
+      let reply: AppApiWriteResult;
+      try {
+        reply = await plane.write(mutations.map(toAppWrite));
+      } catch (err) {
+        return refuse(err);
+      }
+      if (reply.written !== mutations.length || reply.revisions.length !== mutations.length ||
+          reply.revisions.some((id) => typeof id !== "string" || id.length === 0)) {
         throw new DeleteError("mutation_reply_ambiguous");
       }
     },
+  };
+}
+
+function toAppWrite(item: BatchMutation): AppApiMutation {
+  const key = { hash: item.key_value.hash, range: null };
+  if (item.mutation_type === "delete") {
+    return { op: "delete", schema: item.schema, key, revision: item.expected.revision };
+  }
+  return {
+    op: "replace", schema: item.schema, key, revision: item.expected.revision,
+    record: item.record as RowFields,
   };
 }
 
@@ -132,22 +135,17 @@ function object(value: unknown): ObjectRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new DeleteError("reply_shape_ambiguous");
   return value as ObjectRecord;
 }
-function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
-  const envelope = object(item);
-  if (envelope.status !== 200) throw new DeleteError("key_read_unconfirmed");
-  const reply = object(envelope.response);
-  if (reply.ok !== true || !Array.isArray(reply.results) || reply.results.length > 1 ||
-      reply.returned_count !== reply.results.length || reply.limit !== 2 || reply.offset !== 0 ||
-      reply.has_more !== false || reply.next_cursor !== null ||
-      (reply.total_count !== null && reply.total_count !== reply.results.length)) {
+function parseExactRead(item: AppApiReadResult, read: ExactRead): QueryRow | null {
+  // A per-item error is a missing schema or a refusal, not an absent key.
+  if ("error" in item) throw new DeleteError("key_read_unconfirmed");
+  if (!("records" in item) || item.next_cursor !== null || item.records.length > 1) {
     throw new DeleteError("key_read_ambiguous");
   }
-  if (reply.results.length === 0) return null;
-  const row = object(reply.results[0]);
-  const key = object(row.key);
-  const fields = object(row.fields);
-  if (key.hash !== read.key || key.range !== null ||
-      typeof row.revision !== "string" || !/^[a-f0-9]{64}$/.test(row.revision)) {
+  if (item.records.length === 0) return null;
+  const row = item.records[0]!;
+  const fields = object(row.record);
+  if (row.key.hash !== read.key || row.key.range !== null ||
+      typeof row.revision !== "string" || row.revision.length === 0) {
     throw new DeleteError("key_read_scope_mismatch");
   }
   return {
@@ -157,49 +155,17 @@ function parseExactRead(item: unknown, read: ExactRead): QueryRow | null {
   };
 }
 
-export function resolveDeleteSchemas(body: unknown, config: Pick<Config,
+export function resolveDeleteSchemas(config: Pick<Config,
   "schemaHash" | "schemaName" | "indexSchemaHash" | "indexSchemaName"
 >): { secret: string; index: string } {
-  const catalog = object(body);
-  if (catalog.ready !== true || !Array.isArray(catalog.schemas)) throw new DeleteError("schema_catalog_not_ready");
   return {
-    secret: resolveSchema(catalog.schemas, canonicalSchema(lastSecretSchema.schema), config.schemaHash, config.schemaName),
-    index: resolveSchema(catalog.schemas, canonicalSchema(lastSecretIndexSchema.schema), config.indexSchemaHash, config.indexSchemaName),
+    secret: configuredRoute(config.schemaName, config.schemaHash, LAST_SECRET_SCHEMA),
+    index: configuredRoute(config.indexSchemaName, config.indexSchemaHash, LAST_SECRET_INDEX_SCHEMA),
   };
 }
-function resolveSchema(schemas: unknown[], definition: typeof lastSecretSchema.schema,
-  configuredHash?: string, configuredName?: string): string {
-  let route = configuredHash;
-  if (!configuredHash || !/^[a-f0-9]{64}$/.test(configuredHash) || !route) {
-    throw new DeleteError("configured_schema_identity_mismatch");
-  }
-  // Every listed schema owns its values, so the identity alone selects the route.
-  const owned = schemas.filter((value) => object(value).identity_hash === configuredHash);
-  if (owned.length > 1) throw new DeleteError("schema_owner_identity_ambiguous");
-  if (owned.length === 1) {
-    const name = object(owned[0]).name;
-    if (typeof name !== "string" || (configuredName && configuredName !== name)) throw new DeleteError("configured_schema_identity_mismatch");
-    route = name;
-  }
-  // Pin the same literal route as get/put. Current catalogs omit
-  // name_claim_retired. The configured name and identity still have to match.
-  const matches = schemas.filter((value) => object(value).name === route);
-  if (matches.length !== 1) throw new DeleteError("schema_owner_identity_ambiguous");
-  const schema = object(matches[0]);
-  const recordKeys = object(schema.record_keys);
-  const primary = object(recordKeys.primary);
-  if (schema.owner_app_id !== OWNER_APP_ID || schema.descriptive_name !== definition.descriptive_name ||
-      schema.state !== "Available" ||
-      schema.identity_hash !== configuredHash ||
-      schema.schema_type !== definition.schema_type || primary.kind !== definition.record_keys.primary.kind ||
-      primary.allow_absent === true || (primary.range_type !== undefined && primary.range_type !== null) ||
-      Object.keys(object(recordKeys.alternates)).length !== 0 ||
-      !Array.isArray(schema.fields) || schema.fields.length !== definition.fields.length ||
-      new Set(schema.fields).size !== schema.fields.length ||
-      !schema.fields.every((field) => typeof field === "string" && definition.fields.includes(field))) {
-    throw new DeleteError("configured_schema_identity_mismatch");
-  }
-  return route;
+function configuredRoute(name: string | undefined, legacy: string | undefined, expected: string): string {
+  if (name === expected || legacy === expected) return expected;
+  throw new DeleteError("configured_schema_identity_mismatch");
 }
 /** The index rows that can hold an entry of these slugs: the root row, then each bucket row once. */
 export function deleteIndexKeys(slugs: string[]): string[] {
