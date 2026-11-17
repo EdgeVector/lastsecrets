@@ -1,6 +1,6 @@
 {
   "app_id": "lastsecrets",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "source": "https://github.com/EdgeVector/lastsecrets.git",
   "metadata": {
     "display_name": "lastsecrets",

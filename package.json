@@ -1,6 +1,6 @@
 {
   "name": "lastsecrets",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "LastSecrets: LastDB-backed local secret references with no-index secret values",
   "private": true,
   "license": "MIT",
