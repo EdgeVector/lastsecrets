@@ -156,9 +156,9 @@ jobs:
           ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-metadata.json"
+          # Nightly artifact.py reads ARTIFACT_ID itself. It no longer takes --metadata.
           python3 lastdb/scripts/benchmarks/artifact.py \
-            --metadata "$RUNNER_TEMP/measurement-metadata.json" --output "$RUNNER_TEMP/measurement-receipt"
+            --output "$RUNNER_TEMP/measurement-receipt"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/measurement.zip"
           printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/measurement.zip" | sha256sum --check
           unzip -t "$RUNNER_TEMP/measurement.zip" > /dev/null

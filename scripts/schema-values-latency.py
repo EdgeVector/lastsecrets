@@ -283,6 +283,27 @@ def node_api_version(node):
     return (version.get("data") or version).get("api_version", 0)
 
 
+def place_app_schemas(node):
+    """Place every manifest schema on the owner socket, the way the installer does.
+
+    The candidate no longer declares schemas. POST /api/apps/declare-schema takes
+    one schema. Retention, when present, sits beside schema. These schemas have none.
+    """
+    manifest_path = Path(__file__).resolve().parent.parent / "lastdb-app.json"
+    manifest = json.loads(manifest_path.read_text())
+    schemas = manifest.get("schemas")
+    require(isinstance(schemas, list) and len(schemas) > 0, "lastdb-app.json has no schemas to place")
+    for schema in schemas:
+        require(isinstance(schema, dict) and isinstance(schema.get("name"), str), "A manifest schema is not an object")
+        body = {"app_id": "lastsecrets", "schema": schema}
+        if "retention" in schema:
+            placed = dict(schema)
+            body["retention"] = placed.pop("retention")
+            body["schema"] = placed
+        reply = node.call("/api/apps/declare-schema", body)[0]
+        require(isinstance(reply, dict), f"Schema placement for {schema.get('name')} did not return an object")
+
+
 def arm(args, Node, cleanup, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir(mode=0o700)
@@ -304,6 +325,10 @@ def arm(args, Node, cleanup, label, pair):
         save(output / "home-format.json", home)
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
+        # The baseline binary still declares its schemas. The candidate does not,
+        # so this harness places them on the owner socket before the first init.
+        if candidate:
+            place_app_schemas(node)
         command(binary, node, config, "init", "--socket", str(node.socket))
         # Individual CLI calls define the latency workload. Verification batches all known keys.
         for index in range(args.records):

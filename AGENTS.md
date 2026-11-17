@@ -31,10 +31,11 @@ Decision: `decision-2026-10-09-retire-all-tests-and-test-coverage`.
 ## Schema-owned values (Tom, 2026-10-29)
 
 The secret schema and the metadata summary schema own their values.
-The app requires LastDB API 29 or later for complete records and explicit keys.
+The installer places both schemas from `lastdb-app.json`.
+The app addresses them by the exact names `lastsecrets/LastSecret` and `lastsecrets/LastSecretIndex`.
 These schemas hold different records. Do not combine them as alternate keys.
 Canonical field reuse supplies definitions only. It does not share record values.
-`init` requires LastDB API 29 or later and the `owned_app_schemas_v1` capability.
+`init` writes the local config. It does not contact LastDB and it does not declare schemas.
 Field aliases select field names; they never select the record-ownership model.
 Do not change the primary during source or CI work.
 

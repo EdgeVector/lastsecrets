@@ -24,11 +24,12 @@ contributor review is on GitHub pull requests.
 
 ## Initial Schema
 
-LastSecrets requires LastDB API 29 or later and explicit record keys.
 The secret records and metadata summaries use separate schemas that own their values.
 Canonical field definitions stay reusable. They do not share record values.
 These are separate record types, so this change adds no alternate key.
-`init` requires LastDB API 29 or later and the `owned_app_schemas_v1` capability.
+The installer places both schemas from `lastdb-app.json`.
+The app addresses them by the exact names `lastsecrets/LastSecret` and `lastsecrets/LastSecretIndex`.
+`init` writes the local config. It does not contact LastDB and it does not declare schemas.
 
 The initial schema contract is defined in `src/schema.ts`.
 
@@ -43,6 +44,8 @@ lastsecrets init
 ```
 
 Socket resolution order: `--socket`, `LASTSECRETS_SOCKET_PATH`, `LASTDB_SOCKET_PATH`, the config `nodeSocketPath`, then `$LASTDB_HOME/data/folddb.sock`.
+
+When `LASTDB_APP_DATA` is set, the config file is `$LASTDB_APP_DATA/config.json`. `LASTSECRETS_CONFIG` still wins. Otherwise the config file is `~/.lastsecrets/config.json`.
 
 Store a secret from stdin:
 
@@ -94,18 +97,13 @@ lastsecrets delete temporary-dev-invite temporary-dev-api-key
 ```
 
 The command accepts 1–63 distinct slugs and an optional `--config PATH`.
-It uses the current owner access and the same configured schema route as get and put.
-It reads the schema list before reading keys.
-It routes by the pinned schema hash.
-It requires one exact installed name, the correct owner, complete field names, a hash key, and state Available.
-It verifies the saved hash and current identity hash formats. Those hashes can differ after an identity algorithm change.
-A retired name claim remains valid for this exact installed route. The command never switches to another schema name.
-LastDB returns complete records, including secret values, over the owner connection.
+It uses the same configured schema names as get and put.
+A saved config must already name `lastsecrets/LastSecret` and `lastsecrets/LastSecretIndex`. A 64-hex schema id does not resolve on the app socket.
+It reads those keys through `POST /v1/read`. An empty record list means the key is absent. A per-item error means the read was not confirmed.
 LastSecrets keeps the selected metadata and record revision for deletion and emits a receipt containing only references and outcomes.
-Each read collects all selected keys and sends them as native keyed query batches of at most 64 keys, in parallel.
-A verified empty query result means the key is absent.
-A malformed, incomplete, or out-of-scope query result stops that path before a mutation.
-It sends one native Delete batch for the named records that exist, using each observed record revision.
+Each read sends at most 64 keys in one list. Larger reads use parallel lists.
+A malformed, incomplete, or out-of-scope read stops that path before a write.
+It sends one `POST /v1/write` delete list for the named records that exist, each conditioned on the revision from the read.
 An absent key needs no delete. A concurrent replacement causes a revision conflict.
 
 The command then reads the named keys and the metadata index rows again.
@@ -158,7 +156,7 @@ LastSecrets is a local LastDB client, not a network vault. The first threat boun
 
 Metadata is intentionally searchable. Treat `slug`, `label`, `provider`, `purpose`, and `environment` as non-secret review data; do not put credentials, bearer tokens, passwords, or private key material in those fields.
 
-LastDB owns local durability and access to the socket. LastSecrets relies on the local owner socket and schema field classifications to keep `secret_value` out of automatic indexes. If a caller copies `lastsecrets get` output into logs or another database, that disclosure is outside LastSecrets' control.
+LastDB owns local durability. A restricted install talks to the app socket named by `LASTDB_SOCKET_PATH` and can read and write only the schemas named in `lastdb-app.json`. Field classification keeps `secret_value` out of automatic indexes. If a caller copies `lastsecrets get` output into logs or another database, that disclosure is outside LastSecrets' control.
 
 ## Development
 
@@ -170,9 +168,8 @@ The tests are deleted (Tom, 2026-10-09). The `gate` job runs the shell syntax ch
 
 ## Canonical field vocabulary
 
-New schema declarations use the reviewed definitions in `src/canonical-fields.json`.
-A fresh home submits these definitions through normal schema declarations on the local LastDB node.
-LastSecrets never writes to Schema Service itself.
+Schema definitions use the reviewed names in `src/canonical-fields.json`.
+The installer places them from `lastdb-app.json`. LastSecrets does not declare schemas at run time and never writes to Schema Service.
 No special vocabulary key or operator approval path exists.
 `lastdb-app.json` lists the same two canonical schemas, with every field typed. After a schema change, run `bun scripts/write-app-manifest.ts` to regenerate that list from `src/schema.ts` and `src/canonical-fields.json`.
 `lastsecrets vocabulary-json` exports the definitions. `lastsecrets schema-json` exports the canonical secret schema.
@@ -180,14 +177,14 @@ Neither command reads secret values.
 
 The command interface keeps local names such as `slug` and `label`.
 An explicit field map translates these names at the transport boundary.
-The config stores this map for each registered schema identity. Reads and writes use the pinned schema hash.
+The config stores this map under the exact schema names. Reads and writes send those names.
 The map does not copy records or add another field key.
 
-CAUTION: New canonical names produce new schema identities.
-`init` refuses a node older than API 29, or a node without `owned_app_schemas_v1`, before the first declaration.
-It also refuses a change to a saved definition identity.
+CAUTION: New canonical names are a manifest change. The installer places the new definitions. The app does not declare them.
+`init` rewrites the local config to the exact schema names and the installed field map. It does not contact the node.
+A config that still stores a 64-hex schema id must be written again with `lastsecrets init` before a read or a write.
 The config write uses an atomic replacement and flushes the file and its directory.
-Ordinary reads and writes use the saved schema addresses. They never declare schemas or retry a write.
+Ordinary reads and writes use the saved schema names. They never declare schemas or retry a write.
 
 ## CI comparison
 

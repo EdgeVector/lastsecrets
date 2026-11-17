@@ -4,7 +4,7 @@
 import type { Transport } from "@lastdb/app-sdk";
 export type FieldAliasProfiles = Record<string, Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
-const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|app\/search)(\/|$)/;
+const dataRoute = /^\/v1\/(?:read|write)$/;
 function object(value: unknown): ObjectValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : null;
 }
@@ -43,7 +43,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
     const expected = object(value.expected);
     if (expected && typeof expected.field === "string") result.expected = {...expected, field:rename(expected.field, aliases, true)};
   }
-  for (const key of ["queries", "mutations", "keys"]) {
+  for (const key of ["reads", "mutations"]) {
     if (Array.isArray(value[key])) result[key] = (value[key] as unknown[]).map((item) => encodeItem(item, profiles));
   }
   return result;
@@ -56,8 +56,10 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   const result = {...value};
   if (aliases) {
     const inverse = Object.fromEntries(Object.entries(aliases).map(([local, canonical]) => [canonical, local]));
-    const fields = object(value.fields);
-    if (fields) result.fields = renameObject(fields, inverse, false);
+    for (const key of ["fields", "record"]) {
+      const fields = object(value[key]);
+      if (fields) result[key] = renameObject(fields, inverse, false);
+    }
   }
   for (const key of ["results", "result", "response", "rows", "records", "data", "hits"]) {
     if (value[key] !== undefined) result[key] = decodeItem(value[key], profiles, aliases);
@@ -71,10 +73,10 @@ export function decodeFieldReply(path: string, request: unknown, reply: unknown,
   if (!dataRoute.test(path)) return reply;
   const input = object(request);
   const output = object(reply);
-  if (input && Array.isArray(input.queries) && output && Array.isArray(output.results)) {
+  if (input && Array.isArray(input.reads) && output && Array.isArray(output.results)) {
     return {...output, results:output.results.map((item, index) => {
-      const query = object((input.queries as unknown[])[index]);
-      return decodeItem(item, profiles, query ? profile(query, profiles) : undefined);
+      const read = object((input.reads as unknown[])[index]);
+      return decodeItem(item, profiles, read ? profile(read, profiles) : undefined);
     })};
   }
   return decodeItem(reply, profiles, input ? profile(input, profiles) : undefined);

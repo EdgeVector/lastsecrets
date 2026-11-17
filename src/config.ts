@@ -31,6 +31,9 @@ export class ConfigError extends Error {
 export function defaultConfigPath(): string {
   const override = process.env.LASTSECRETS_CONFIG;
   if (override && override.length > 0) return override;
+  // A restricted app can write only inside the folder the launcher names.
+  const appData = process.env.LASTDB_APP_DATA;
+  if (appData && appData.length > 0) return join(appData, "config.json");
   return join(homedir(), ".lastsecrets", "config.json");
 }
 

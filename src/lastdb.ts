@@ -2,17 +2,27 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
+  AppApiError,
+  LastDbClient as SdkClient,
   TransportError,
   UnexpectedResponseError,
   udsTransport,
+  type AppApiMutation,
+  type AppApiReadResult,
+  type AppApiRecord,
+  type RowFields,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
-import { type SchemaDefinition } from "./schema.ts";
-import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
-import { ownedDeclaration, requireOwnedHome } from "./schema-mode.ts";
+import { profilesFor } from "./canonical-vocabulary.ts";
 import { fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 import { newNativeBatchClient, type NativeBatchClient } from "./batch.ts";
+import {
+  LAST_SECRET_INDEX_SCHEMA,
+  LAST_SECRET_SCHEMA,
+  lastSecretIndexSchema,
+  lastSecretSchema,
+} from "./schema.ts";
 
 export type QueryRow = {
   fields: Record<string, unknown>;
@@ -23,11 +33,6 @@ export type QueryRow = {
 export type LastDbClient = {
   readonly schemaFieldAliases: FieldAliasProfiles;
   nativeBatch: NativeBatchClient;
-  autoIdentity(): Promise<{ userHash: string }>;
-  declareAppSchema(
-    appId: string,
-    schema: SchemaDefinition,
-  ): Promise<{ canonical: string; schemaName: string }>;
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -45,9 +50,9 @@ export type LastDbClient = {
     fields: string[];
   }): Promise<QueryRow | null>;
   /**
-   * Exact HashKey reads of one schema through `/api/queries/batch`, in key
-   * order (null for an absent key). Any item the node does not confirm fails
-   * the whole call: an unread row must never look like an absent row.
+   * Exact key reads of one schema through `POST /v1/read`, in key order
+   * (null for an absent key). A read the node does not confirm fails the
+   * whole call: an unread row must never look like an absent row.
    */
   queryByKeys(opts: {
     schemaHash: string;
@@ -68,10 +73,7 @@ export class LastSecretsError extends Error {
   }
 }
 
-type FetchInit = RequestInit & { unix?: string };
-type FetchLike = (url: string, init?: FetchInit) => Promise<Response>;
-
-/** The native `/api/queries/batch` limit. */
+/** The app API accepts at most 64 reads in one list. */
 const BATCH_READ_LIMIT = 64;
 const SOCKET_FILE_NAME = "folddb.sock";
 // Local Mini is Unix-socket only. DEFAULT_NODE_URL is the loopback marker stored in config.
@@ -95,170 +97,85 @@ export function resolveSocketPath(override?: string, configValue?: string): stri
   return join(lastdbHome, "data", SOCKET_FILE_NAME);
 }
 
+/** Local field names for the two installed schemas. The installer places the canonical names. */
+export function installedFieldAliases(): FieldAliasProfiles {
+  return {
+    ...profilesFor(lastSecretSchema.schema, [LAST_SECRET_SCHEMA]),
+    ...profilesFor(lastSecretIndexSchema.schema, [LAST_SECRET_INDEX_SCHEMA]),
+  };
+}
+
 export function newLastDbClient(opts: {
   socketPath?: string;
   socketPathOverride?: string;
-  fetchImpl?: FetchLike;
   queryTimeoutMs?: number;
   schemaFieldAliases?: FieldAliasProfiles;
 } = {}): LastDbClient {
   const socketPath = resolveSocketPath(opts.socketPathOverride, opts.socketPath);
-  const fetchImpl = opts.fetchImpl ?? (fetch as FetchLike);
-  const queryTimeoutMs = opts.queryTimeoutMs ?? 30_000; // 30s default timeout
-  const defaultHeaders: Record<string, string> = {
-    "X-LastDB-Client": "lastsecrets",
+  const queryTimeoutMs = opts.queryTimeoutMs ?? 30_000;
+  const fieldProfiles: FieldAliasProfiles = {
+    ...installedFieldAliases(),
+    ...opts.schemaFieldAliases,
   };
-  const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
   const sdkTransport: SdkTransport = fieldAliasTransport(
-    udsTransport(socketPath, defaultHeaders), fieldProfiles);
-  // API 30 returns complete records. Project only inside this owner process.
+    udsTransport(socketPath, { "X-LastDB-Client": "lastsecrets" }, { timeoutMs: queryTimeoutMs }),
+    fieldProfiles,
+  );
+  // Construct the client directly. connect() calls GET /api/version, which the app socket does not serve.
+  const sdk = new SdkClient("lastsecrets", sdkTransport);
+
   const readKeyBatch = async (
-    schemaHash: string,
+    schema: string,
     keys: string[],
     fields: string[],
   ): Promise<(QueryRow | null)[]> => {
-    const body = {
-      queries: keys.map((key) => ({
-        schema_name: schemaHash, filter: { HashKey: key }, limit: 2, offset: 0,
-      })),
-    };
-    let response;
+    if (keys.length === 0) return [];
+    let results: AppApiReadResult[];
     try {
-      response = await withTimeout(sdkTransport.send("POST", "/api/queries/batch", { body }), queryTimeoutMs);
+      results = await withTimeout(sdk.read(keys.map((key) => ({
+        schema,
+        key: { hash: key, range: null },
+        limit: 2,
+      }))), queryTimeoutMs);
     } catch (err) {
       if (err instanceof LastSecretsError) throw err;
       throw mapSdkError(err, socketPath);
     }
-    if (response.status !== 200) {
-      throw new LastSecretsError(
-        `node_http_${response.status}`,
-        `LastDB POST /api/queries/batch returned HTTP ${response.status}${safeBodyMessage(response.body)}`,
-      );
-    }
-    const reply = asObject(response.body);
-    if (!reply || !Array.isArray(reply.results) || reply.results.length !== keys.length) {
+    if (results.length !== keys.length) {
       throw new LastSecretsError("batch_read_ambiguous", "LastDB returned an incomplete batch read.");
     }
-    return reply.results.map((item, position) => {
-      const key = keys[position]!;
-      const envelope = asObject(item);
-      const page = asObject(envelope?.response);
-      // A Hash key names at most one record.
-      if (envelope?.status !== 200 || !page || page.ok === false || !Array.isArray(page.results) ||
-          page.results.length > 1 || page.has_more === true) {
-        throw new LastSecretsError("batch_read_ambiguous", `LastDB did not confirm the read of key ${key}.`);
-      }
-      if (page.results.length === 0) return null;
-      const row = asObject(page.results[0]);
-      const rowKey = asObject(row?.key);
-      const rowFields = asObject(row?.fields);
-      const revision = row?.revision;
-      if (!rowFields || rowKey?.hash !== key || rowKey.range !== null ||
-          typeof revision !== "string" || !/^[a-f0-9]{64}$/.test(revision)) {
-        throw new LastSecretsError("batch_read_ambiguous", `LastDB returned another record for key ${key}.`);
-      }
-      return {
-        fields: Object.fromEntries(fields.filter((field) => Object.hasOwn(rowFields, field)).map((field) => [field, rowFields[field]])),
-        key: { hash: key, range: null },
-        revision,
-      };
-    });
+    return results.map((item, position) => pointRow(item, keys[position]!, fields));
   };
 
-  const writeRecord = async (schema: string, hash: string, fields: Record<string, unknown>, revision?: string) => {
-    let response;
+  const writeRecord = async (
+    schema: string,
+    hash: string,
+    fields: Record<string, unknown>,
+    revision?: string,
+  ) => {
+    const key = { hash, range: null };
+    const record = fields as RowFields;
+    const mutation: AppApiMutation = revision === undefined
+      ? { op: "create", schema, key, record }
+      : { op: "replace", schema, key, revision, record };
+    let written;
     try {
-      response = await withTimeout(sdkTransport.send("POST", "/api/mutation", { body: {
-        type: "mutation", schema, record: fields, key_value: { hash, range: null }, alternates: {},
-        mutation_type: revision === undefined ? "create" : "replace",
-        expected: revision === undefined ? { type: "absent" } : { type: "revision", revision },
-        durability: "durable",
-      } }), queryTimeoutMs);
+      written = await withTimeout(sdk.write([mutation]), queryTimeoutMs);
     } catch (err) {
       throw mapSdkError(err, socketPath);
     }
-    const written = asObject(response.body)?.record_revision;
-    if (response.status !== 200 || typeof written !== "string" || !/^[a-f0-9]{64}$/.test(written)) {
-      throw new LastSecretsError("record_write_unconfirmed", `LastDB did not confirm the record write (HTTP ${response.status}).`);
+    const next = written.revisions[0];
+    if (written.written !== 1 || typeof next !== "string" || next.length === 0) {
+      throw new LastSecretsError("record_write_unconfirmed", "LastDB did not confirm the record write.");
     }
-  };
-
-  // Owner setup still uses node-specific endpoints that the app data SDK does
-  // not expose: auto-identity and schema declaration.
-  const callJson = async (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-  ): Promise<unknown> => {
-    const headers: Record<string, string> = {};
-    let requestBody: string | undefined;
-    if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      requestBody = JSON.stringify(body);
-    }
-
-    const url = `http://localhost${path}`;
-    let response: Response;
-    try {
-      const fetchPromise = fetchImpl(url, {
-        method,
-        headers,
-        body: requestBody,
-        unix: socketPath,
-      });
-      response = await withTimeout(fetchPromise, queryTimeoutMs);
-    } catch (err) {
-      if (err instanceof LastSecretsError && err.code === "query_timeout") {
-        throw err;
-      }
-      throw new LastSecretsError(
-        "service_unreachable",
-        `LastDB is not reachable over its Unix socket ${socketPath}.`,
-        err,
-      );
-    }
-
-    const text = await response.text();
-    const parsed = parseBody(text);
-    if (!response.ok) {
-      throw new LastSecretsError(
-        `node_http_${response.status}`,
-        `LastDB ${method} ${path} returned HTTP ${response.status}${safeBodyMessage(parsed)}`,
-      );
-    }
-    return parsed;
-  };
-
-  let readiness: Promise<void> | undefined;
-  const ensureReady = (): Promise<void> => {
-    return readiness ??= callJson("/api/version", "GET").then(unwrapData).then((version) => {
-      requireOwnedHome(version);
-    });
   };
 
   return {
     get schemaFieldAliases() { return {...fieldProfiles}; },
-    nativeBatch: newNativeBatchClient(sdkTransport),
-    async autoIdentity() {
-      const body = await callJson("/api/system/auto-identity", "GET");
-      const userHash = objectString(body, "user_hash");
-      if (!userHash) {
-        throw new LastSecretsError(
-          "auto_identity_bad_response",
-          "LastDB auto-identity response did not include user_hash.",
-        );
-      }
-      return { userHash };
-    },
-    async declareAppSchema(appId, schema) {
-      await ensureReady();
-      const local = schema;
-      schema = canonicalSchema(schema);
-      const body = await callJson("/api/schemas/declare", "POST", {namespace:appId, schema});
-      const {identity, runtime} = ownedDeclaration(body, `${appId}/${schema.name}`);
-      Object.assign(fieldProfiles, profilesFor(local, [identity, runtime]));
-      return {canonical:identity, schemaName:runtime};
-    },
+    nativeBatch: newNativeBatchClient({
+      read: (reads) => sdk.read(reads),
+      write: (mutations) => sdk.write(mutations),
+    }),
     async createRecord({ schemaHash, fields, keyHash }) {
       await writeRecord(schemaHash, keyHash, fields);
     },
@@ -279,7 +196,41 @@ export function newLastDbClient(opts: {
   };
 }
 
+function pointRow(result: AppApiReadResult, key: string, fields: string[]): QueryRow | null {
+  if ("error" in result) {
+    // not_found here means the schema name is wrong. An absent key is an empty record list.
+    throw new LastSecretsError(
+      result.error.code || "record_read_failed",
+      `LastDB did not confirm the read of key ${key}: ${redactKnownSecretWords(result.error.message)}`,
+    );
+  }
+  if (!("records" in result) || result.next_cursor !== null || result.records.length > 1) {
+    throw new LastSecretsError("batch_read_ambiguous", `LastDB did not confirm the read of key ${key}.`);
+  }
+  if (result.records.length === 0) return null;
+  return rowFromRecord(result.records[0]!, key, fields);
+}
+
+function rowFromRecord(row: AppApiRecord, key: string, fields: string[]): QueryRow {
+  if (row.key.hash !== key || row.key.range !== null || typeof row.revision !== "string" || row.revision.length === 0) {
+    throw new LastSecretsError("batch_read_ambiguous", `LastDB returned another record for key ${key}.`);
+  }
+  const record = row.record as Record<string, unknown>;
+  return {
+    fields: Object.fromEntries(fields.filter((field) => Object.hasOwn(record, field)).map((field) => [field, record[field]])),
+    key: { hash: key, range: null },
+    revision: row.revision,
+  };
+}
+
 function mapSdkError(err: unknown, socketPath: string): Error {
+  if (err instanceof AppApiError) {
+    return new LastSecretsError(
+      err.status === 409 ? "conflict" : `node_http_${err.status}`,
+      `LastDB returned HTTP ${err.status}${err.message ? `: ${redactKnownSecretWords(err.message)}` : ""}`,
+      err,
+    );
+  }
   if (err instanceof TransportError) {
     return new LastSecretsError(
       "service_unreachable",
@@ -297,15 +248,6 @@ function mapSdkError(err: unknown, socketPath: string): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-function parseBody(text: string): unknown {
-  if (text.length === 0) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
 function safeBodyMessage(body: unknown): string {
   const message = objectString(body, "message") || objectString(body, "error");
   return message ? `: ${redactKnownSecretWords(message)}` : "";
@@ -315,21 +257,6 @@ function objectString(value: unknown, key: string): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
-}
-
-function asObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function unwrapData(body: unknown): Record<string, unknown> {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return {};
-  const rec = body as Record<string, unknown>;
-  if (typeof rec.data === "object" && rec.data !== null && !Array.isArray(rec.data)) {
-    return rec.data as Record<string, unknown>;
-  }
-  return rec;
 }
 
 export function redactKnownSecretWords(value: string): string {
