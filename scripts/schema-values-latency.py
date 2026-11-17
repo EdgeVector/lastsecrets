@@ -325,10 +325,10 @@ def arm(args, Node, cleanup, label, pair):
         save(output / "home-format.json", home)
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
-        # The baseline binary still declares its schemas. The candidate does not,
-        # so this harness places them on the owner socket before the first init.
-        if candidate:
-            place_app_schemas(node)
+        # The app no longer declares its schemas (lastsecrets#33), and the baseline
+        # is now such an app too. Place them on the owner socket for both arms
+        # before the first init, the way the installer does.
+        place_app_schemas(node)
         command(binary, node, config, "init", "--socket", str(node.socket))
         # Individual CLI calls define the latency workload. Verification batches all known keys.
         for index in range(args.records):
