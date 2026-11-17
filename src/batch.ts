@@ -1,6 +1,6 @@
 import {
   AppApiError, TransportError,
-  type AppApiMutation, type AppApiReadResult, type AppApiWriteResult, type RowFields,
+  type ReadResult, type RowFields, type WriteItem, type WriteResult,
 } from "@lastdb/app-sdk";
 import type { Config } from "./config.ts";
 import type { QueryRow } from "./lastdb.ts";
@@ -29,8 +29,8 @@ export type BatchMutation = {
   expected: { type: "revision"; revision: string };
 };
 export type AppPlane = {
-  read(reads: readonly { schema: string; key: { hash: string; range: null }; limit: number }[]): Promise<AppApiReadResult[]>;
-  write(mutations: readonly AppApiMutation[]): Promise<AppApiWriteResult>;
+  read(reads: readonly { schema: string; key: { hash: string; range: null }; limit: number }[]): Promise<ReadResult[]>;
+  write(mutations: readonly WriteItem[]): Promise<WriteResult>;
 };
 export type NativeBatchClient = {
   readKeys(reads: ExactRead[]): Promise<(QueryRow | null)[]>;
@@ -84,7 +84,7 @@ export function newNativeBatchClient(plane: AppPlane): NativeBatchClient {
     throw new DeleteError("request_outcome_unconfirmed");
   };
   const readChunk = async (reads: ExactRead[]): Promise<(QueryRow | null)[]> => {
-    let results: AppApiReadResult[];
+    let results: ReadResult[];
     try {
       results = await plane.read(reads.map((read) => ({
         schema: read.schema, key: { hash: read.key, range: null }, limit: 2,
@@ -106,7 +106,7 @@ export function newNativeBatchClient(plane: AppPlane): NativeBatchClient {
       return (await Promise.all(chunks.map(readChunk))).flat();
     },
     async mutate(mutations) {
-      let reply: AppApiWriteResult;
+      let reply: WriteResult;
       try {
         reply = await plane.write(mutations.map(toAppWrite));
       } catch (err) {
@@ -120,7 +120,7 @@ export function newNativeBatchClient(plane: AppPlane): NativeBatchClient {
   };
 }
 
-function toAppWrite(item: BatchMutation): AppApiMutation {
+function toAppWrite(item: BatchMutation): WriteItem {
   const key = { hash: item.key_value.hash, range: null };
   if (item.mutation_type === "delete") {
     return { op: "delete", schema: item.schema, key, revision: item.expected.revision };
@@ -135,7 +135,7 @@ function object(value: unknown): ObjectRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new DeleteError("reply_shape_ambiguous");
   return value as ObjectRecord;
 }
-function parseExactRead(item: AppApiReadResult, read: ExactRead): QueryRow | null {
+function parseExactRead(item: ReadResult, read: ExactRead): QueryRow | null {
   // A per-item error is a missing schema or a refusal, not an absent key.
   if ("error" in item) throw new DeleteError("key_read_unconfirmed");
   if (!("records" in item) || item.next_cursor !== null || item.records.length > 1) {

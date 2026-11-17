@@ -7,11 +7,12 @@ import {
   TransportError,
   UnexpectedResponseError,
   udsTransport,
-  type AppApiMutation,
-  type AppApiReadResult,
-  type AppApiRecord,
+  type ReadResult,
+  // The SDK reply record is named Record. That name would hide TypeScript's Record.
+  type Record as SdkRecord,
   type RowFields,
   type Transport as SdkTransport,
+  type WriteItem,
 } from "@lastdb/app-sdk";
 
 import { profilesFor } from "./canonical-vocabulary.ts";
@@ -130,7 +131,7 @@ export function newLastDbClient(opts: {
     fields: string[],
   ): Promise<(QueryRow | null)[]> => {
     if (keys.length === 0) return [];
-    let results: AppApiReadResult[];
+    let results: ReadResult[];
     try {
       results = await withTimeout(sdk.read(keys.map((key) => ({
         schema,
@@ -155,7 +156,7 @@ export function newLastDbClient(opts: {
   ) => {
     const key = { hash, range: null };
     const record = fields as RowFields;
-    const mutation: AppApiMutation = revision === undefined
+    const mutation: WriteItem = revision === undefined
       ? { op: "create", schema, key, record }
       : { op: "replace", schema, key, revision, record };
     let written;
@@ -196,7 +197,7 @@ export function newLastDbClient(opts: {
   };
 }
 
-function pointRow(result: AppApiReadResult, key: string, fields: string[]): QueryRow | null {
+function pointRow(result: ReadResult, key: string, fields: string[]): QueryRow | null {
   if ("error" in result) {
     // not_found here means the schema name is wrong. An absent key is an empty record list.
     throw new LastSecretsError(
@@ -211,7 +212,7 @@ function pointRow(result: AppApiReadResult, key: string, fields: string[]): Quer
   return rowFromRecord(result.records[0]!, key, fields);
 }
 
-function rowFromRecord(row: AppApiRecord, key: string, fields: string[]): QueryRow {
+function rowFromRecord(row: SdkRecord, key: string, fields: string[]): QueryRow {
   if (row.key.hash !== key || row.key.range !== null || typeof row.revision !== "string" || row.revision.length === 0) {
     throw new LastSecretsError("batch_read_ambiguous", `LastDB returned another record for key ${key}.`);
   }
