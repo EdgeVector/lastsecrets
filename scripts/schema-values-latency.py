@@ -134,32 +134,35 @@ def schemas(config):
     return aliases, cfg["schemaHash"], cfg["indexSchemaHash"]
 
 
-def query_records(node, queries):
-    queries = [{name: value for name, value in query.items() if name != "fields"} for query in queries]
-    return node.call("/api/queries/batch", {"queries": queries})[0]
+def read_records(node, reads):
+    reply = node.call("/v1/read", {"reads": reads})[0]
+    results = reply.get("results")
+    require(isinstance(results, list) and len(results) == len(reads), "The known-key read batch is incomplete")
+    for read, result in zip(reads, results):
+        require(isinstance(result, dict) and not result.get("error")
+                and isinstance(result.get("records"), list) and "next_cursor" in result and result["next_cursor"] is None
+                and len(result["records"]) <= 1, "An exact known-key read is incomplete or ambiguous")
+        for row in result["records"]:
+            require(isinstance(row, dict) and row.get("key") == read["key"]
+                    and isinstance(row.get("record"), dict)
+                    and isinstance(row.get("revision"), str) and re.fullmatch(r"[a-f0-9]{64}", row["revision"])
+                    and "file" in row and (row["file"] is None or isinstance(row["file"], dict)),
+                    "A known-key read returned an invalid record")
+    return results
 
 
 def snapshot(node, config, expected, absent=()):
     aliases, record_schema, summary = schemas(config)
     requests = [(record_schema, key, SECRET_FIELDS) for key in expected] + [(summary, key, SUMMARY_FIELDS) for key in SUMMARY_KEYS]
     requests.extend((record_schema, key, SECRET_FIELDS) for key in absent)
-    queries = [{"schema_name": schema, "fields": [aliases.get(schema, {}).get(field, field) for field in fields],
-                "filter": {"HashKey": key}, "limit": 2, "offset": 0, "response_format":"full"} for schema, key, fields in requests]
+    reads = [{"schema": schema, "key": {"hash": key, "range": None}, "limit": 2} for schema, key, _ in requests]
     records, members = {}, {}
-    for start in range(0, len(queries), 64):
-        reply = query_records(node, queries[start:start + 64])
-        rows = reply.get("results")
-        require(reply.get("count") == len(queries[start:start + 64]) and isinstance(rows, list), "The snapshot batch is incomplete")
-        require(len(rows) == len(queries[start:start + 64]), "The snapshot batch count differs")
-        for offset, item in enumerate(rows):
-            query = queries[start + offset]
-            response = item.get("response", {})
-            result = response.get("results", [])
-            require(item.get("status") == 200 and response.get("ok") is True and response.get("has_more") is False,
-                    "An exact known-key read is incomplete")
-            key = query["filter"]["HashKey"]
-            summary_row = query["schema_name"] == summary
-            if key in absent and query["schema_name"] == record_schema:
+    for start in range(0, len(reads), 64):
+        for offset, item in enumerate(read_records(node, reads[start:start + 64])):
+            schema, key, declared_fields = requests[start + offset]
+            result = item["records"]
+            summary_row = schema == summary
+            if key in absent and schema == record_schema:
                 require(result == [], "A deleted key still returns a record")
                 continue
             if summary_row and result == []:
@@ -167,20 +170,20 @@ def snapshot(node, config, expected, absent=()):
                 continue
             require(len(result) == 1, "A known record is absent or ambiguous")
             row = result[0]
-            require(row.get("key") == {"hash": key, "range": None}, "An exact read returned another key")
-            fields = row.get("fields", {})
-            require(set(fields) == set(query["fields"]), "A known record lacks declared fields")
+            fields = row["record"]
+            require(set(fields) == {aliases.get(schema, {}).get(field, field) for field in declared_fields},
+                    "A known record lacks declared fields")
             if summary_row:
                 name = aliases.get(summary, {}).get("payload_json", "payload_json")
                 members[key] = sorted(item["slug"] for item in json.loads(fields[name]))
             else:
                 name = aliases.get(record_schema, {}).get("secret_value", "secret_value")
                 require(fields[name] == {"value": expected[key]}, "A complete generated value differs")
-            # Reopen and repeated setup must keep the values and the record metadata.
+            # Reopen and repeated setup must keep the values, revision and attached file.
             # Only a hash of the values is kept: generated value bytes never enter the output.
-            records[f"{query['schema_name']}/{key}"] = {
+            records[f"{schema}/{key}"] = {
                 "fields_sha256": hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest(),
-                "metadata": row.get("metadata")}
+                "revision": row["revision"], "file": row["file"]}
     # Each known slug is in exactly one summary row.
     listed = [item for key in SUMMARY_KEYS for item in members.get(key, [])]
     require(len(listed) == len(set(listed)) == len(expected) and set(listed) == set(expected),
@@ -198,18 +201,14 @@ def move_to_root(node, config, slugs):
     """
     aliases, _, summary = schemas(config)
     name = lambda field: aliases.get(summary, {}).get(field, field)
-    queries = [{"schema_name": summary, "fields": [name(field) for field in SUMMARY_FIELDS],
-                "filter": {"HashKey": key}, "limit": 2, "offset": 0} for key in SUMMARY_KEYS]
-    reply = query_records(node, queries)
-    require(reply.get("count") == len(queries) and len(reply.get("results", [])) == len(queries),
-            "The summary batch is incomplete")
+    reads = [{"schema": summary, "key": {"hash": key, "range": None}, "limit": 2} for key in SUMMARY_KEYS]
+    results = read_records(node, reads)
     rows, revisions = {}, {}
-    for key, item in zip(SUMMARY_KEYS, reply["results"]):
-        require(item.get("status") == 200 and item["response"].get("has_more") is False, "A summary read is incomplete")
-        if item["response"]["results"]:
-            row = item["response"]["results"][0]
-            rows[key] = json.loads(row["fields"][name("payload_json")])
-            revisions[key] = row.get("revision")
+    for key, item in zip(SUMMARY_KEYS, results):
+        if item["records"]:
+            row = item["records"][0]
+            rows[key] = json.loads(row["record"][name("payload_json")])
+            revisions[key] = row["revision"]
     require(SUMMARY_ROOT not in rows, "A fresh home of this app already has a root summary row")
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     wanted, moved, mutations = set(slugs), [], []
@@ -217,12 +216,11 @@ def move_to_root(node, config, slugs):
     def mutation(key, mutation_type, entries):
         fields = {name("key"): key, name("updated_at"): now,
                   name("payload_json"): json.dumps(entries, separators=(",", ":"))}
-        base = {"type": "mutation", "schema": summary, "key_value": {"hash": key, "range": None}}
+        base = {"schema": summary, "key": {"hash": key, "range": None}}
         revision = revisions.get(key)
         require(mutation_type == "create" or isinstance(revision, str), "The root move lacks a record revision")
-        expected = {"type": "absent"} if mutation_type == "create" else {"type": "revision", "revision": revision}
-        return {**base, "mutation_type": "create" if mutation_type == "create" else "replace",
-                "record": fields, "alternates": {}, "expected": expected}
+        return {**base, "op": "create" if mutation_type == "create" else "replace", "record": fields,
+                **({"revision": revision} if mutation_type != "create" else {})}
     for key, entries in rows.items():
         kept = [entry for entry in entries if entry["slug"] not in wanted]
         if len(kept) != len(entries):
@@ -230,8 +228,12 @@ def move_to_root(node, config, slugs):
             mutations.append(mutation(key, "update", kept))
     require(sorted(entry["slug"] for entry in moved) == sorted(wanted), "A selected summary entry is absent")
     mutations.append(mutation(SUMMARY_ROOT, "create", sorted(moved, key=lambda entry: entry["slug"])))
-    written = node.call("/api/mutations/batch", {"mutations": mutations})[0]
-    require(written.get("count") == len(mutations), "The root summary setup was not acknowledged")
+    written = node.call("/v1/write", {"mutations": mutations})[0]
+    revisions = written.get("revisions")
+    require(written.get("written") == len(mutations) and isinstance(revisions, list)
+            and len(revisions) == len(mutations)
+            and all(isinstance(revision, str) and re.fullmatch(r"[a-f0-9]{64}", revision) for revision in revisions),
+            "The root summary setup was not acknowledged")
 
 
 def require_cloud_off(node, output, phase):
@@ -323,6 +325,7 @@ def arm(args, Node, cleanup, label, pair):
         # The marker exists after the first start. Record the observed home format and API.
         home = {"format": node.home_format(), "api_version": node_api_version(node)}
         save(output / "home-format.json", home)
+        require(home["api_version"] >= 40, "The hosted operation requires the API 40 batched record contract")
         require_cloud_off(node, output, "before-setup")
         # Each arm sets up its own fresh home. No arm changes an old home.
         # The app no longer declares its schemas (lastsecrets#33), and the baseline
